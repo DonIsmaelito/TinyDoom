@@ -1,0 +1,116 @@
+:root {
+  color-scheme: dark;
+  --bg: #101014;
+  --panel: #1a1a21;
+  --line: #2e2e39;
+  --text: #ececf1;
+  --muted: #a3a3b2;
+  --real: #ececf1;
+  --cnn: #ffb454;
+  --convgru: #5ac8fa;
+  --repeat: #8d8d9c;
+  --accent: #ffc440;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 18px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+main {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 20px 20px 48px;
+}
+
+h1 {
+  margin: 0;
+  font-size: 2.2rem;
+  letter-spacing: 0.01em;
+}
+
+.panels {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  margin-top: 18px;
+}
+
+.panels[hidden],
+.clip[hidden] {
+  display: none;
+}
+
+.panel {
+  margin: 0;
+  padding: 12px;
+  background: var(--panel);
+  border: 2px solid var(--line);
+  border-radius: 10px;
+}
+
+.panel canvas {
+  display: block;
+  width: 100%;
+  aspect-ratio: 1;
+  background: #000;
+  border-radius: 4px;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+
+.panel figcaption {
+  margin-top: 10px;
+}
+
+.panel .name {
+  display: block;
+  font-size: 1.5rem;
+  font-weight: 700;
+}
+
+.panel .about {
+  display: block;
+  color: var(--muted);
+  font-size: 1rem;
+}
+
+.panel[data-series="real"] .name {
+  color: var(--real);
+}
+
+.panel[data-series="cnn"] .name {
+  color: var(--cnn);
+}
+
+.panel[data-series="convgru"] .name {
+  color: var(--convgru);
+}
+
+.clip {
+  display: block;
+  width: 100%;
+  margin-top: 18px;
+  border-radius: 10px;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+
+.status {
+  margin: 14px 0 0;
+  color: var(--muted);
+}
+
+.status.error {
+  color: var(--accent);
+}
+
+.status:empty {
+  display: none;
+}

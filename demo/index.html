@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TinyDoom: two small models predict Doom frames</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main>
+    <header>
+      <h1>TinyDoom</h1>
+    </header>
+
+    <section id="stage" aria-live="polite">
+      <div id="panels" class="panels" hidden></div>
+      <img id="clip" class="clip" alt="Recording of the real game next to both models' predictions" hidden>
+      <p id="status" class="status">Loading the models…</p>
+    </section>
+  </main>
+
+  <script src="vendor/ort.wasm.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
