@@ -99,36 +99,57 @@
       this.frameShape = [1, 3, size, size];
       this.frame = null;
       this.hidden = null;
+      this.ahead = null;
     }
 
-    async run(frame, action) {
+    // One call of the ONNX step: returns the predicted frame and the new memory.
+    async run(frame, action, hidden) {
       const feeds = {
         frame: new ort.Tensor('float32', frame, this.frameShape),
         action: new ort.Tensor('int64', BigInt64Array.from([BigInt(action)]), [1]),
       };
-      if (this.hiddenShape) {
-        feeds.hidden = new ort.Tensor('float32', this.hidden, this.hiddenShape);
-      }
+      if (this.hiddenShape) feeds.hidden = new ort.Tensor('float32', hidden, this.hiddenShape);
       const out = await this.session.run(feeds);
-      if (this.hiddenShape) this.hidden = out.hidden_out.data;
-      return out.next_frame.data;
+      return { frame: out.next_frame.data, hidden: this.hiddenShape ? out.hidden_out.data : null };
     }
 
-    // Start again from real frame t. A model with memory starts with an empty memory and
-    // first observes the real frames just before t, with the actions that were taken.
+    // A model with memory starts from real frame t with an empty memory and first observes
+    // the real frames just before t, with the actions that were taken. Each call here does
+    // one of those observations, so they can be spread over the steps before t is reached.
+    async prepare(episode, t) {
+      if (!this.hiddenShape) return;
+      if (!this.ahead || this.ahead.episode !== episode || this.ahead.t !== t) {
+        this.ahead = {
+          episode,
+          t,
+          next: Math.max(0, t - (this.contextFrames - 1)),
+          hidden: new Float32Array(this.hiddenShape.reduce((a, b) => a * b, 1)),
+        };
+      }
+      const ahead = this.ahead;
+      if (ahead.next >= t) return;
+      const i = ahead.next;
+      ahead.hidden = (await this.run(episode.chw(i), episode.actions[i], ahead.hidden)).hidden;
+      ahead.next += 1;
+    }
+
+    // Start again from real frame t.
     async showRealFrame(episode, t) {
       if (this.hiddenShape) {
-        this.hidden = new Float32Array(this.hiddenShape.reduce((a, b) => a * b, 1));
-        for (let i = Math.max(0, t - (this.contextFrames - 1)); i < t; i++) {
-          await this.run(episode.chw(i), episode.actions[i]);
-        }
+        do {
+          await this.prepare(episode, t);
+        } while (this.ahead.next < t);
+        this.hidden = this.ahead.hidden;
+        this.ahead = null;
       }
       this.frame = episode.chw(t);
     }
 
     // Predict the next frame from the model's own current frame.
     async predict(action) {
-      this.frame = await this.run(this.frame, action);
+      const out = await this.run(this.frame, action, this.hidden);
+      this.frame = out.frame;
+      this.hidden = out.hidden;
       return this.frame;
     }
   }
@@ -181,6 +202,11 @@
       for (const model of models) frames[model.name] = await model.predict(action);
       this.t += 1;
       this.k += 1;
+      // Get a little ready for the next real frame, so that step is not a slow one.
+      const next = this.anchor + this.interval;
+      if (this.interval > 0 && next + this.interval <= last) {
+        for (const model of models) await model.prepare(episode, next);
+      }
       const real = episode.chw(this.t);
       const errors = { repeat_last_frame: meanAbsDiff(episode.chw(this.anchor), real) };
       for (const model of models) errors[model.name] = meanAbsDiff(frames[model.name], real);
@@ -258,11 +284,13 @@
     const detail = document.createElement('span');
     detail.className = 'about';
     detail.textContent = about;
-    caption.append(title, detail);
+    const now = document.createElement('span');
+    now.className = 'now';
+    caption.append(title, detail, now);
     figure.append(canvas, caption);
     $('panels').append(figure);
     const context = canvas.getContext('2d');
-    app.panels[series] = { figure, context, image: context.createImageData(size, size) };
+    app.panels[series] = { figure, context, now, image: context.createImageData(size, size) };
   }
 
   function buildPanels() {
@@ -294,20 +322,42 @@
     context.putImageData(image, 0, 0);
   }
 
+  function renderReadout(k, action) {
+    $('steps').textContent = k;
+    $('steps-label').textContent =
+      `step${k === 1 ? '' : 's'} since the models last saw a real frame`;
+    $('counter').classList.toggle('fresh', k <= 1);
+    for (const key of $('keys').children) {
+      key.classList.toggle('on', Number(key.dataset.action) === action);
+    }
+    const { episode, t } = app.player;
+    app.panels.real.now.textContent = `episode ${episode.id}, frame ${t} of ${episode.count - 1}`;
+  }
+
   // Show the real frame the scene starts from in every panel.
   function renderStart() {
     const { episode, t } = app.player;
     drawBytes('real', episode.rgba(t));
-    for (const model of app.models) drawBytes(model.name, episode.rgba(t));
+    for (const model of app.models) {
+      drawBytes(model.name, episode.rgba(t));
+      app.panels[model.name].now.textContent = 'starting from the real frame';
+    }
+    renderReadout(0, null);
   }
 
   function renderStep(result) {
     drawBytes('real', app.player.episode.rgba(result.t));
-    for (const model of app.models) drawFloat(model.name, result.frames[model.name]);
+    for (const model of app.models) {
+      drawFloat(model.name, result.frames[model.name]);
+      app.panels[model.name].now.textContent =
+        `error now ${result.errors[model.name].toFixed(3)}`;
+    }
+    renderReadout(result.k, result.action);
   }
 
   function startScene(index) {
     app.scene = index;
+    $('scene').value = index;
     const scene = app.scenes[index];
     app.player = new Player(app.models, app.episodes[scene.episode], scene.start, app.interval);
     renderStart();
@@ -343,7 +393,75 @@
   function setPlaying(playing) {
     app.playing = playing;
     app.loop += 1;
+    $('play').textContent = playing ? 'Pause' : 'Play';
     if (playing) playLoop(app.loop).catch(fail);
+  }
+
+  function stepOnce() {
+    setPlaying(false);
+    return enqueue(tick).catch(fail);
+  }
+
+  // Back to the start frame of the chosen episode, with nothing measured yet.
+  function reset() {
+    return enqueue(() => {
+      app.stats = new ErrorStats();
+      startScene(app.scene);
+    });
+  }
+
+  function setRealFrameInterval(interval) {
+    app.interval = interval;
+    $('interval').value = interval;
+    if (app.player) app.player.interval = interval;
+  }
+
+  function setSpeed(speed) {
+    app.speed = speed;
+    $('speed').value = speed;
+  }
+
+  function buildControls() {
+    const order = ['turn_left', 'forward', 'turn_right'];
+    const names = app.manifest.action_names.map((name, index) => ({ name, index }));
+    names.sort((a, b) => order.indexOf(a.name) - order.indexOf(b.name));
+    for (const { name, index } of names) {
+      const key = document.createElement('span');
+      key.className = 'key';
+      key.dataset.action = index;
+      key.textContent = name.replace(/_/g, ' ');
+      $('keys').append(key);
+    }
+    app.scenes.forEach((scene, index) => {
+      const option = document.createElement('option');
+      option.value = index;
+      option.textContent = `${app.episodes[scene.episode].id}, from frame ${scene.start}`;
+      $('scene').append(option);
+    });
+
+    $('play').addEventListener('click', () => setPlaying(!app.playing));
+    $('step').addEventListener('click', stepOnce);
+    $('reset').addEventListener('click', reset);
+    $('speed').addEventListener('change', (event) => setSpeed(Number(event.target.value)));
+    $('interval').addEventListener('change', (event) =>
+      setRealFrameInterval(Number(event.target.value))
+    );
+    $('scene').addEventListener('change', (event) => {
+      const index = Number(event.target.value);
+      enqueue(() => startScene(index));
+    });
+    document.addEventListener('keydown', (event) => {
+      if (event.ctrlKey || event.metaKey || event.altKey) return;
+      if (['BUTTON', 'SELECT', 'INPUT'].includes(event.target.tagName)) return;
+      if (event.key === ' ') {
+        event.preventDefault();
+        setPlaying(!app.playing);
+      } else if (event.key === 's' || event.key === 'ArrowRight') {
+        stepOnce();
+      } else if (event.key === 'r') {
+        reset();
+      }
+    });
   }
 
   // ---- Loading -----------------------------------------------------------------------------
@@ -357,6 +475,7 @@
     console.error(error);
     setPlaying(false);
     $('panels').hidden = true;
+    $('compare').hidden = true;
     if (app.manifest && app.manifest.clip) {
       showClip();
       setStatus(
@@ -403,9 +522,11 @@
     if (!app.scenes.length) throw new Error('The export has no episodes to play.');
 
     buildPanels();
+    buildControls();
     startScene(0);
     $('clip').hidden = true;
     $('panels').hidden = false;
+    $('compare').hidden = false;
     setStatus('');
   }
 

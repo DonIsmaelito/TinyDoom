@@ -18,6 +18,45 @@
       <img id="clip" class="clip" alt="Recording of the real game next to both models' predictions" hidden>
       <p id="status" class="status">Loading the models…</p>
     </section>
+
+    <section id="compare" hidden>
+      <div class="readout">
+        <p id="counter" class="counter">
+          <span id="steps" class="steps">0</span>
+          <span id="steps-label">steps since the models last saw a real frame</span>
+        </p>
+        <div class="action">
+          <span class="action-label">The player's recorded action</span>
+          <span id="keys" class="keys"></span>
+        </div>
+      </div>
+
+      <div class="controls">
+        <button id="play" type="button">Pause</button>
+        <button id="step" type="button">Step</button>
+        <button id="reset" type="button">Reset</button>
+        <label>Speed
+          <select id="speed">
+            <option value="1">1 step a second</option>
+            <option value="2">2 steps a second</option>
+            <option value="4" selected>4 steps a second</option>
+            <option value="8.75">Game speed (8.75 steps a second)</option>
+          </select>
+        </label>
+        <label>Show the models a real frame
+          <select id="interval">
+            <option value="1">every step</option>
+            <option value="5">every 5 steps</option>
+            <option value="10" selected>every 10 steps</option>
+            <option value="30">every 30 steps</option>
+            <option value="0">never again</option>
+          </select>
+        </label>
+        <label>Episode
+          <select id="scene"></select>
+        </label>
+      </div>
+    </section>
   </main>
 
   <script src="vendor/ort.wasm.min.js"></script>
