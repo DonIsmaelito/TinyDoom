@@ -1,0 +1,1033 @@
+'use strict';
+
+// TinyDoom demo page. Everything runs in the browser: the two models are ONNX files run by
+// ONNX Runtime Web, and the real frames come from test episodes exported by export_demo.py.
+
+(() => {
+  // The page address can change these: ?interval=5&speed=8.75&idle=30&autoplay=0
+  const params = new URLSearchParams(location.search);
+  const number = (name, fallback) =>
+    params.has(name) && Number.isFinite(Number(params.get(name)))
+      ? Number(params.get(name))
+      : fallback;
+  const DEFAULTS = { interval: number('interval', 10), speed: number('speed', 4) };
+  // A paused page plays again by itself after this long without input (0 turns this off),
+  // and after six times as long it also goes back to the default settings.
+  const IDLE_SECONDS = number('idle', 20);
+
+  const $ = (id) => document.getElementById(id);
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  // ---- Real frames -------------------------------------------------------------------------
+
+  // One recorded episode. All of its frames are in one image, `columns` frames per row.
+  class Episode {
+    constructor(entry, sheet, manifest) {
+      this.id = entry.id;
+      this.actions = entry.actions;
+      this.starts = entry.starts;
+      this.count = entry.frames;
+      this.size = manifest.frame_size;
+      this.columns = manifest.sheet_columns;
+      this.sheet = sheet;
+      this.rgbaCache = new Array(this.count);
+      this.chwCache = new Array(this.count);
+    }
+
+    // Frame t as RGBA bytes, for drawing.
+    rgba(t) {
+      if (!this.rgbaCache[t]) {
+        const { size, columns, sheet } = this;
+        const out = new Uint8ClampedArray(size * size * 4);
+        const left = (t % columns) * size;
+        const top = Math.floor(t / columns) * size;
+        for (let y = 0; y < size; y++) {
+          const from = ((top + y) * sheet.width + left) * 4;
+          out.set(sheet.data.subarray(from, from + size * 4), y * size * 4);
+        }
+        this.rgbaCache[t] = out;
+      }
+      return this.rgbaCache[t];
+    }
+
+    // Frame t as the models take it: float32, channel by channel, values 0 to 1.
+    chw(t) {
+      if (!this.chwCache[t]) {
+        const rgba = this.rgba(t);
+        const n = this.size * this.size;
+        const out = new Float32Array(3 * n);
+        for (let i = 0; i < n; i++) {
+          out[i] = rgba[4 * i] / 255;
+          out[n + i] = rgba[4 * i + 1] / 255;
+          out[2 * n + i] = rgba[4 * i + 2] / 255;
+        }
+        this.chwCache[t] = out;
+      }
+      return this.chwCache[t];
+    }
+  }
+
+  async function decodeImage(blob) {
+    try {
+      return await createImageBitmap(blob, {
+        colorSpaceConversion: 'none',
+        premultiplyAlpha: 'none',
+      });
+    } catch (error) {
+      const image = new Image();
+      image.src = URL.createObjectURL(blob);
+      await image.decode();
+      return image;
+    }
+  }
+
+  async function loadEpisode(entry, manifest) {
+    const response = await fetch(entry.sheet);
+    if (!response.ok) throw new Error(`${entry.sheet}: HTTP ${response.status}`);
+    const image = await decodeImage(await response.blob());
+    const canvas = document.createElement('canvas');
+    canvas.width = image.width;
+    canvas.height = image.height;
+    const context = canvas.getContext('2d', { willReadFrequently: true });
+    context.drawImage(image, 0, 0);
+    const sheet = context.getImageData(0, 0, canvas.width, canvas.height);
+    return new Episode(entry, sheet, manifest);
+  }
+
+  // ---- Models ------------------------------------------------------------------------------
+
+  // One model. It holds the frame it will predict from, and its memory if it has one.
+  class StepModel {
+    constructor(entry, session, size) {
+      this.name = entry.name;
+      this.label = entry.label;
+      this.parameters = entry.parameters;
+      this.contextFrames = entry.context_frames;
+      this.hiddenShape = entry.hidden_shape;
+      this.session = session;
+      this.frameShape = [1, 3, size, size];
+      this.frame = null;
+      this.hidden = null;
+      this.ahead = null;
+    }
+
+    // One call of the ONNX step: returns the predicted frame and the new memory.
+    async run(frame, action, hidden) {
+      const feeds = {
+        frame: new ort.Tensor('float32', frame, this.frameShape),
+        action: new ort.Tensor('int64', BigInt64Array.from([BigInt(action)]), [1]),
+      };
+      if (this.hiddenShape) feeds.hidden = new ort.Tensor('float32', hidden, this.hiddenShape);
+      const out = await this.session.run(feeds);
+      return { frame: out.next_frame.data, hidden: this.hiddenShape ? out.hidden_out.data : null };
+    }
+
+    // A model with memory starts from real frame t with an empty memory and first observes
+    // the real frames just before t, with the actions that were taken. Each call here does
+    // one of those observations, so they can be spread over the steps before t is reached.
+    async prepare(episode, t) {
+      if (!this.hiddenShape) return;
+      if (!this.ahead || this.ahead.episode !== episode || this.ahead.t !== t) {
+        this.ahead = {
+          episode,
+          t,
+          next: Math.max(0, t - (this.contextFrames - 1)),
+          hidden: new Float32Array(this.hiddenShape.reduce((a, b) => a * b, 1)),
+        };
+      }
+      const ahead = this.ahead;
+      if (ahead.next >= t) return;
+      const i = ahead.next;
+      ahead.hidden = (await this.run(episode.chw(i), episode.actions[i], ahead.hidden)).hidden;
+      ahead.next += 1;
+    }
+
+    // Start again from real frame t.
+    async showRealFrame(episode, t) {
+      if (this.hiddenShape) {
+        do {
+          await this.prepare(episode, t);
+        } while (this.ahead.next < t);
+        this.hidden = this.ahead.hidden;
+        this.ahead = null;
+      }
+      this.frame = episode.chw(t);
+    }
+
+    // Predict the next frame from the model's own current frame.
+    async predict(action) {
+      const out = await this.run(this.frame, action, this.hidden);
+      this.frame = out.frame;
+      this.hidden = out.hidden;
+      return this.frame;
+    }
+  }
+
+  async function loadModel(entry, manifest) {
+    const response = await fetch(entry.file);
+    if (!response.ok) throw new Error(`${entry.file}: HTTP ${response.status}`);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    const session = await ort.InferenceSession.create(bytes, {
+      executionProviders: ['wasm'],
+      graphOptimizationLevel: 'all',
+    });
+    return new StepModel(entry, session, manifest.frame_size);
+  }
+
+  function meanAbsDiff(a, b) {
+    let sum = 0;
+    for (let i = 0; i < a.length; i++) sum += Math.abs(a[i] - b[i]);
+    return sum / a.length;
+  }
+
+  // ---- Playing an episode ------------------------------------------------------------------
+
+  // Plays one episode from a start frame. The models predict from their own output and are
+  // shown a real frame every `interval` steps (0 means never again after the start).
+  class Player {
+    constructor(models, episode, start, interval) {
+      this.models = models;
+      this.episode = episode;
+      this.interval = interval;
+      this.t = start; // the frame the panels show
+      this.k = null; // steps since the models saw a real frame; null before the first one
+      this.anchor = start; // the last real frame the models saw
+    }
+
+    // One step. Returns null when the episode has nothing left to play.
+    async step() {
+      const { episode, models } = this;
+      const last = episode.count - 1;
+      if (this.t >= last) return null;
+      if (this.k === null || (this.interval > 0 && this.k >= this.interval)) {
+        // Only start a stretch that fits, so every stretch has the same number of steps.
+        if (this.interval > 0 && this.t + this.interval > last) return null;
+        for (const model of models) await model.showRealFrame(episode, this.t);
+        this.anchor = this.t;
+        this.k = 0;
+      }
+      const action = episode.actions[this.t];
+      const frames = {};
+      for (const model of models) frames[model.name] = await model.predict(action);
+      this.t += 1;
+      this.k += 1;
+      // Get a little ready for the next real frame, so that step is not a slow one.
+      const next = this.anchor + this.interval;
+      if (this.interval > 0 && next + this.interval <= last) {
+        for (const model of models) await model.prepare(episode, next);
+      }
+      const real = episode.chw(this.t);
+      const errors = { repeat_last_frame: meanAbsDiff(episode.chw(this.anchor), real) };
+      for (const model of models) errors[model.name] = meanAbsDiff(frames[model.name], real);
+      return { t: this.t, k: this.k, action, frames, errors };
+    }
+  }
+
+  // Mean error at each number of steps since the last real frame.
+  class ErrorStats {
+    constructor() {
+      this.sums = {};
+      this.counts = [];
+    }
+
+    add(k, errors) {
+      this.counts[k] = (this.counts[k] || 0) + 1;
+      for (const [name, value] of Object.entries(errors)) {
+        if (!this.sums[name]) this.sums[name] = [];
+        this.sums[name][k] = (this.sums[name][k] || 0) + value;
+      }
+    }
+
+    // means()[name][k] is the mean error of `name` at step k; index 0 is unused.
+    means() {
+      const out = {};
+      for (const [name, sums] of Object.entries(this.sums)) {
+        out[name] = sums.map((sum, k) => sum / this.counts[k]);
+      }
+      return out;
+    }
+  }
+
+  // ---- The page ----------------------------------------------------------------------------
+
+  const app = {
+    manifest: null,
+    episodes: [],
+    models: [],
+    scenes: [], // { episode: index into episodes, start: frame }
+    scene: 0,
+    player: null,
+    stats: new ErrorStats(),
+    playing: false,
+    failed: false,
+    interval: DEFAULTS.interval,
+    speed: DEFAULTS.speed,
+    loop: 0,
+    timings: [],
+    panels: {},
+    mode: 'compare',
+    playScene: 0,
+    playSteps: 0,
+    playHolding: null,
+    playLoop: 0,
+    playPanels: {},
+    playModelFilter: 'both',
+  };
+
+  // The models run one call at a time. Everything that uses them goes through this queue.
+  let queue = Promise.resolve();
+  function enqueue(job) {
+    const result = queue.then(job);
+    queue = result.catch(() => {});
+    return result;
+  }
+
+  function parameterText(count) {
+    return count >= 1e6 ? `${(count / 1e6).toFixed(1)}M` : `${Math.round(count / 1e3)}K`;
+  }
+
+  function addPanelTo(parent, store, series, name, about, extraClass) {
+    const size = app.manifest.frame_size;
+    const figure = document.createElement('figure');
+    figure.className = 'panel' + (extraClass ? ` ${extraClass}` : '');
+    figure.dataset.series = series;
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const caption = document.createElement('figcaption');
+    const title = document.createElement('span');
+    title.className = 'name';
+    title.textContent = name;
+    const detail = document.createElement('span');
+    detail.className = 'about';
+    detail.textContent = about;
+    caption.append(title, detail);
+    figure.append(canvas, caption);
+    parent.append(figure);
+    const context = canvas.getContext('2d');
+    store[series] = { figure, context, image: context.createImageData(size, size) };
+  }
+
+  function buildPanels() {
+    const size = app.manifest.frame_size;
+    function panel(parent, store, series, name, about, extraClass) {
+      addPanelTo(parent, store, series, name, about, extraClass);
+      const now = document.createElement('span');
+      now.className = 'now';
+      store[series].figure.querySelector('figcaption').append(now);
+      store[series].now = now;
+    }
+    panel($('panels'), app.panels, 'real', 'Real game', 'what the game actually showed');
+    for (const model of app.models) {
+      const memory = model.hiddenShape
+        ? 'remembers earlier frames'
+        : 'sees only its current frame';
+      panel(
+        $('panels'),
+        app.panels,
+        model.name,
+        model.label,
+        `${parameterText(model.parameters)} parameters, ${memory}`
+      );
+    }
+  }
+
+  function drawPanel(store, series, rgba) {
+    const { context, image } = store[series];
+    image.data.set(rgba);
+    context.putImageData(image, 0, 0);
+  }
+
+  function drawPanelFloat(store, series, chw) {
+    const { context, image } = store[series];
+    const data = image.data;
+    const n = chw.length / 3;
+    for (let i = 0; i < n; i++) {
+      data[4 * i] = chw[i] * 255;
+      data[4 * i + 1] = chw[n + i] * 255;
+      data[4 * i + 2] = chw[2 * n + i] * 255;
+      data[4 * i + 3] = 255;
+    }
+    context.putImageData(image, 0, 0);
+  }
+
+  function buildPlayMode() {
+    addPanelTo(
+      $('play-panels'),
+      app.playPanels,
+      'real',
+      'Real start frame',
+      'where reset returns',
+      'real-anchor'
+    );
+    for (const model of app.models) {
+      const memory = model.hiddenShape ? 'memory on' : 'one frame only';
+      addPanelTo($('play-panels'), app.playPanels, model.name, model.label, memory);
+    }
+    const actions = [
+      ['ArrowUp', '0', 'forward'],
+      ['ArrowLeft', '1', 'turn left'],
+      ['ArrowRight', '2', 'turn right'],
+    ];
+    for (const [key, action, label] of actions) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'hold';
+      button.dataset.action = action;
+      button.dataset.key = key;
+      button.textContent = label;
+      $('hold-keys').append(button);
+    }
+    app.scenes.forEach((scene, index) => {
+      const option = document.createElement('option');
+      option.value = index;
+      option.textContent = `${app.episodes[scene.episode].id}, from frame ${scene.start}`;
+      $('play-scene').append(option);
+    });
+    $('play-model').addEventListener('change', (event) => {
+      app.playModelFilter = event.target.value;
+      updatePlayVisibility();
+    });
+    $('play-scene').addEventListener('change', (event) => {
+      app.playScene = Number(event.target.value);
+      resetPlay();
+    });
+    $('play-reset').addEventListener('click', () => resetPlay());
+    for (const button of $('hold-keys').children) {
+      const down = () => beginHold(Number(button.dataset.action), button);
+      const up = () => endHold(button);
+      button.addEventListener('pointerdown', (event) => {
+        event.preventDefault();
+        button.setPointerCapture(event.pointerId);
+        down();
+      });
+      button.addEventListener('pointerup', up);
+      button.addEventListener('pointercancel', up);
+    }
+    $('view-compare').addEventListener('click', () => setView('compare'));
+    $('view-play').addEventListener('click', () => setView('play'));
+  }
+
+  function updatePlayVisibility() {
+    for (const model of app.models) {
+      const show =
+        app.playModelFilter === 'both' || app.playModelFilter === model.name;
+      app.playPanels[model.name].figure.hidden = !show;
+    }
+  }
+
+  function setView(mode) {
+    app.mode = mode;
+    $('view-compare').classList.toggle('active', mode === 'compare');
+    $('view-play').classList.toggle('active', mode === 'play');
+    $('compare').classList.toggle('play-hidden', mode !== 'compare');
+    $('play-mode').hidden = mode !== 'play';
+    $('chart-section').classList.toggle('play-hidden', mode !== 'compare');
+    $('panels').hidden = mode !== 'compare';
+    if (mode === 'compare') {
+      app.playHolding = null;
+      app.playLoop += 1;
+      for (const button of $('hold-keys').children) button.classList.remove('pressed');
+      enqueue(() => startScene(app.scene));
+    } else {
+      setPlaying(false);
+      $('play-scene').value = app.playScene;
+      resetPlay();
+    }
+  }
+
+  function renderPlay(frames) {
+    const scene = app.scenes[app.playScene];
+    const episode = app.episodes[scene.episode];
+    drawPanel(app.playPanels, 'real', episode.rgba(scene.start));
+    for (const model of app.models) {
+      if (frames) drawPanelFloat(app.playPanels, model.name, frames[model.name]);
+      else drawPanel(app.playPanels, model.name, episode.rgba(scene.start));
+    }
+    $('play-steps').textContent = app.playSteps;
+    updatePlayVisibility();
+  }
+
+  function resetPlay() {
+    return enqueue(async () => {
+      const scene = app.scenes[app.playScene];
+      const episode = app.episodes[scene.episode];
+      for (const model of app.models) await model.showRealFrame(episode, scene.start);
+      app.playSteps = 0;
+      app.playHolding = null;
+      app.playLoop += 1;
+      for (const button of $('hold-keys').children) button.classList.remove('pressed');
+      renderPlay();
+    });
+  }
+
+  async function playDriveStep(action) {
+    const frames = {};
+    for (const model of app.models) frames[model.name] = await model.predict(action);
+    app.playSteps += 1;
+    renderPlay(frames);
+  }
+
+  function beginHold(action, button) {
+    if (app.mode !== 'play' || app.failed) return;
+    app.playHolding = action;
+    button.classList.add('pressed');
+    app.playLoop += 1;
+    playHoldLoop(app.playLoop).catch(fail);
+  }
+
+  function endHold(button) {
+    button.classList.remove('pressed');
+    if (Number(button.dataset.action) === app.playHolding) app.playHolding = null;
+  }
+
+  async function playHoldLoop(loop) {
+    const pace = 1000 / 8.75;
+    while (app.mode === 'play' && loop === app.playLoop && app.playHolding !== null) {
+      const started = performance.now();
+      const action = app.playHolding;
+      await enqueue(() => playDriveStep(action));
+      await sleep(Math.max(0, pace - (performance.now() - started)));
+    }
+  }
+
+  function drawBytes(series, rgba) {
+    const { context, image } = app.panels[series];
+    image.data.set(rgba);
+    context.putImageData(image, 0, 0);
+  }
+
+  function drawFloat(series, chw) {
+    const { context, image } = app.panels[series];
+    const data = image.data;
+    const n = chw.length / 3;
+    for (let i = 0; i < n; i++) {
+      data[4 * i] = chw[i] * 255;
+      data[4 * i + 1] = chw[n + i] * 255;
+      data[4 * i + 2] = chw[2 * n + i] * 255;
+      data[4 * i + 3] = 255;
+    }
+    context.putImageData(image, 0, 0);
+  }
+
+  function renderReadout(k, action) {
+    $('steps').textContent = k;
+    $('steps-label').textContent =
+      `step${k === 1 ? '' : 's'} since the models last saw a real frame`;
+    $('counter').classList.toggle('fresh', k <= 1);
+    for (const key of $('keys').children) {
+      key.classList.toggle('on', Number(key.dataset.action) === action);
+    }
+    const { episode, t } = app.player;
+    app.panels.real.now.textContent = `episode ${episode.id}, frame ${t} of ${episode.count - 1}`;
+  }
+
+  // Show the real frame the scene starts from in every panel.
+  function renderStart() {
+    const { episode, t } = app.player;
+    drawBytes('real', episode.rgba(t));
+    for (const model of app.models) {
+      drawBytes(model.name, episode.rgba(t));
+      app.panels[model.name].now.textContent = 'starting from the real frame';
+    }
+    renderReadout(0, null);
+    drawChart();
+  }
+
+  function renderStep(result) {
+    drawBytes('real', app.player.episode.rgba(result.t));
+    for (const model of app.models) {
+      drawFloat(model.name, result.frames[model.name]);
+      app.panels[model.name].now.textContent =
+        `error now ${result.errors[model.name].toFixed(3)}`;
+    }
+    renderReadout(result.k, result.action);
+    drawChart();
+  }
+
+  // ---- Error chart --------------------------------------------------------------------------
+
+  function chartSeries() {
+    const style = getComputedStyle(document.documentElement);
+    const series = app.models.map((model) => ({
+      name: model.name,
+      label: model.label,
+      color: style.getPropertyValue(`--${model.name}`).trim() || '#ffffff',
+      dashed: false,
+    }));
+    series.push({
+      name: 'repeat_last_frame',
+      label: 'No model: repeat the last real frame',
+      color: style.getPropertyValue('--repeat').trim(),
+      dashed: true,
+    });
+    return series;
+  }
+
+  function buildLegend() {
+    for (const series of chartSeries()) {
+      const item = document.createElement('li');
+      const swatch = document.createElement('span');
+      swatch.className = series.dashed ? 'swatch dashed' : 'swatch';
+      swatch.style.borderTopColor = series.color;
+      item.append(swatch, series.label);
+      $('legend').append(item);
+    }
+  }
+
+  // A number at or above value whose quarters are short to print, for the top of the axis.
+  function niceCeiling(value) {
+    const unit = 10 ** Math.floor(Math.log10(value));
+    for (const m of [1, 2, 4, 8, 10]) if (m * unit >= value) return m * unit;
+    return 10 * unit;
+  }
+
+  function drawChart() {
+    const canvas = $('chart');
+    const ratio = window.devicePixelRatio || 1;
+    const width = canvas.clientWidth;
+    const height = canvas.clientHeight;
+    if (!width || !height) return;
+    if (canvas.width !== Math.round(width * ratio)) canvas.width = Math.round(width * ratio);
+    if (canvas.height !== Math.round(height * ratio)) canvas.height = Math.round(height * ratio);
+    const g = canvas.getContext('2d');
+    g.setTransform(ratio, 0, 0, ratio, 0, 0);
+    g.clearRect(0, 0, width, height);
+
+    const style = getComputedStyle(document.documentElement);
+    const muted = style.getPropertyValue('--muted').trim();
+    const line = style.getPropertyValue('--line').trim();
+    const fontSize = width < 500 ? 12 : 15;
+    g.font = `${fontSize}px system-ui, sans-serif`;
+
+    const means = app.stats.means();
+    const steps = Math.max(10, app.stats.counts.length - 1);
+    let top = 0.02;
+    for (const values of Object.values(means)) {
+      for (let k = 1; k < values.length; k++) top = Math.max(top, values[k] || 0);
+    }
+    top = niceCeiling(top);
+
+    const box = { left: fontSize * 4, right: width - 12, top: 10, bottom: height - fontSize * 3 };
+    const x = (k) => box.left + ((k - 1) / (steps - 1)) * (box.right - box.left);
+    const y = (value) => box.bottom - (value / top) * (box.bottom - box.top);
+
+    g.lineWidth = 1;
+    g.strokeStyle = line;
+    g.fillStyle = muted;
+    g.textAlign = 'right';
+    g.textBaseline = 'middle';
+    for (let i = 0; i <= 4; i++) {
+      const value = (top * i) / 4;
+      g.beginPath();
+      g.moveTo(box.left, y(value));
+      g.lineTo(box.right, y(value));
+      g.stroke();
+      g.fillText(value.toFixed(3), box.left - 8, y(value));
+    }
+    g.textAlign = 'center';
+    g.textBaseline = 'top';
+    const labels = width < 500 ? 6 : 12;
+    const every = steps <= labels ? 1 : Math.ceil(steps / labels / 5) * 5;
+    for (let k = 1; k <= steps; k++) {
+      if (k === 1 || k % every === 0) g.fillText(k, x(k), box.bottom + 6);
+    }
+    const title = 'steps since the models last saw a real frame';
+    g.fillText(title, (box.left + box.right) / 2, box.bottom + 8 + fontSize);
+
+    // Where playback is now.
+    const k = app.player ? app.player.k : null;
+    if (k) {
+      g.strokeStyle = style.getPropertyValue('--accent').trim();
+      g.globalAlpha = 0.5;
+      g.beginPath();
+      g.moveTo(x(k), box.top);
+      g.lineTo(x(k), box.bottom);
+      g.stroke();
+      g.globalAlpha = 1;
+    }
+
+    for (const series of chartSeries().reverse()) {
+      const values = means[series.name] || [];
+      g.strokeStyle = series.color;
+      g.fillStyle = series.color;
+      g.lineWidth = 3;
+      g.setLineDash(series.dashed ? [8, 6] : []);
+      g.beginPath();
+      let drawing = false;
+      for (let step = 1; step < values.length; step++) {
+        if (values[step] === undefined) {
+          drawing = false;
+        } else if (drawing) {
+          g.lineTo(x(step), y(values[step]));
+        } else {
+          g.moveTo(x(step), y(values[step]));
+          drawing = true;
+        }
+      }
+      g.stroke();
+      g.setLineDash([]);
+      if (steps <= 30) {
+        for (let step = 1; step < values.length; step++) {
+          if (values[step] === undefined) continue;
+          g.beginPath();
+          g.arc(x(step), y(values[step]), 4, 0, 2 * Math.PI);
+          g.fill();
+        }
+      }
+    }
+  }
+
+  function startScene(index) {
+    app.scene = index;
+    $('scene').value = index;
+    const scene = app.scenes[index];
+    app.player = new Player(app.models, app.episodes[scene.episode], scene.start, app.interval);
+    renderStart();
+  }
+
+  // After an episode ends, play the next episode from its best start frame.
+  function nextScene() {
+    const episode = (app.scenes[app.scene].episode + 1) % app.episodes.length;
+    return app.scenes.findIndex((scene) => scene.episode === episode);
+  }
+
+  async function tick() {
+    const started = performance.now();
+    let result = await app.player.step();
+    if (result === null) {
+      startScene(nextScene());
+      result = await app.player.step();
+    }
+    app.stats.add(result.k, result.errors);
+    renderStep(result);
+    app.timings.push(performance.now() - started);
+    if (app.timings.length > 2000) app.timings.shift();
+  }
+
+  async function playLoop(loop) {
+    while (app.playing && loop === app.loop) {
+      const started = performance.now();
+      await enqueue(tick);
+      await sleep(Math.max(0, 1000 / app.speed - (performance.now() - started)));
+    }
+  }
+
+  function setPlaying(playing) {
+    app.playing = playing;
+    app.loop += 1;
+    $('play').textContent = playing ? 'Pause' : 'Play';
+    $('idle-note').hidden = playing || IDLE_SECONDS <= 0;
+    if (playing) playLoop(app.loop).catch(fail);
+  }
+
+  function stepOnce() {
+    setPlaying(false);
+    return enqueue(tick).catch(fail);
+  }
+
+  // Back to the start frame of the chosen episode, with nothing measured yet.
+  function reset() {
+    return enqueue(() => {
+      app.stats = new ErrorStats();
+      startScene(app.scene);
+    });
+  }
+
+  function setRealFrameInterval(interval) {
+    app.interval = interval;
+    $('interval').value = interval;
+    if (app.player) app.player.interval = interval;
+  }
+
+  function setSpeed(speed) {
+    app.speed = speed;
+    $('speed').value = speed;
+  }
+
+  function buildControls() {
+    const order = ['turn_left', 'forward', 'turn_right'];
+    const names = app.manifest.action_names.map((name, index) => ({ name, index }));
+    names.sort((a, b) => order.indexOf(a.name) - order.indexOf(b.name));
+    for (const { name, index } of names) {
+      const key = document.createElement('span');
+      key.className = 'key';
+      key.dataset.action = index;
+      key.textContent = name.replace(/_/g, ' ');
+      $('keys').append(key);
+    }
+    app.scenes.forEach((scene, index) => {
+      const option = document.createElement('option');
+      option.value = index;
+      option.textContent = `${app.episodes[scene.episode].id}, from frame ${scene.start}`;
+      $('scene').append(option);
+    });
+
+    $('play').addEventListener('click', () => setPlaying(!app.playing));
+    $('step').addEventListener('click', stepOnce);
+    $('reset').addEventListener('click', reset);
+    $('speed').addEventListener('change', (event) => setSpeed(Number(event.target.value)));
+    $('interval').addEventListener('change', (event) =>
+      setRealFrameInterval(Number(event.target.value))
+    );
+    $('scene').addEventListener('change', (event) => {
+      const index = Number(event.target.value);
+      enqueue(() => startScene(index));
+    });
+    const arrowActions = { ArrowUp: 0, ArrowLeft: 1, ArrowRight: 2 };
+    document.addEventListener('keydown', (event) => {
+      if (event.ctrlKey || event.metaKey || event.altKey) return;
+      if (app.mode === 'play') {
+        if (Object.hasOwn(arrowActions, event.key)) {
+          event.preventDefault();
+          const button = [...$('hold-keys').children].find((b) => b.dataset.key === event.key);
+          if (button && app.playHolding !== arrowActions[event.key]) beginHold(arrowActions[event.key], button);
+        }
+        return;
+      }
+      if (['BUTTON', 'SELECT', 'INPUT'].includes(event.target.tagName)) return;
+      if (event.key === ' ') {
+        event.preventDefault();
+        setPlaying(!app.playing);
+      } else if (event.key === 's' || event.key === 'ArrowRight') {
+        stepOnce();
+      } else if (event.key === 'r') {
+        reset();
+      }
+    });
+    document.addEventListener('keyup', (event) => {
+      if (app.mode !== 'play' || !Object.hasOwn(arrowActions, event.key)) return;
+      const button = [...$('hold-keys').children].find((b) => b.dataset.key === event.key);
+      if (button) endHold(button);
+    });
+  }
+
+  // ---- Poster mode: play by itself when nobody is using the page ----------------------------
+
+  function watchForIdle() {
+    if (IDLE_SECONDS <= 0) return;
+    $('idle-note').textContent =
+      `Paused. It plays again by itself after ${IDLE_SECONDS} seconds without input.`;
+    let lastInput = performance.now();
+    for (const type of ['pointerdown', 'keydown', 'input', 'change', 'wheel']) {
+      document.addEventListener(
+        type,
+        () => {
+          lastInput = performance.now();
+        },
+        { capture: true, passive: true }
+      );
+    }
+    setInterval(() => {
+      const idle = (performance.now() - lastInput) / 1000;
+      if (app.failed) return;
+      if (app.mode === 'compare' && idle >= IDLE_SECONDS && !app.playing) setPlaying(true);
+      if (idle >= 6 * IDLE_SECONDS) {
+        if (app.interval !== DEFAULTS.interval) setRealFrameInterval(DEFAULTS.interval);
+        if (app.speed !== DEFAULTS.speed) setSpeed(DEFAULTS.speed);
+      }
+    }, 1000);
+  }
+
+  // ---- The text under the chart --------------------------------------------------------------
+
+  function buildAbout() {
+    for (const model of app.models) {
+      const item = document.createElement('li');
+      const memory = model.hiddenShape
+        ? 'It has a memory, so it can use what it saw in earlier frames.'
+        : 'It sees only its current frame.';
+      item.textContent =
+        `${model.label}: ${model.parameters.toLocaleString('en-US')} parameters. ${memory}`;
+      $('model-notes').append(item);
+    }
+    const sizes = app.models.map((model) => model.parameters);
+    const ratio = Math.max(...sizes) / Math.min(...sizes);
+    if (app.models.length === 2 && ratio >= 1.25) {
+      const [small, large] = [...app.models].sort((a, b) => a.parameters - b.parameters);
+      const times = Math.abs(ratio - 2) < 0.25 ? 'about twice' : `${ratio.toFixed(1)} times`;
+      const item = document.createElement('li');
+      const also = large.hiddenShape && !small.hiddenShape ? 'its memory' : 'its design';
+      item.textContent =
+        `The ${large.label} has ${times} the parameters of the ${small.label}, so a better ` +
+        `score may come from its size as well as from ${also}.`;
+      $('model-notes').append(item);
+    }
+
+    const metrics = app.manifest.metrics;
+    if (!metrics) {
+      $('scores-title').hidden = true;
+      return;
+    }
+    $('scores-title').textContent =
+      `Scores on all ${metrics.episodes} ${metrics.split} episodes (${metrics.rollouts} rollouts)`;
+    const rows = app.models.map((model) => ({ label: model.label, steps: metrics[model.name] }));
+    rows.push({ label: 'No model: repeat the last frame', steps: metrics.repeat_last_frame });
+    const columns = Object.keys(metrics.repeat_last_frame);
+    const head = $('scores').createTHead().insertRow();
+    head.append(document.createElement('th'));
+    for (const step of columns) {
+      const cell = document.createElement('th');
+      cell.textContent = `${step} step${step === '1' ? '' : 's'}`;
+      head.append(cell);
+    }
+    const body = $('scores').createTBody();
+    for (const row of rows) {
+      const line = body.insertRow();
+      line.insertCell().textContent = row.label;
+      for (const step of columns) {
+        const cell = line.insertCell();
+        cell.textContent = row.steps[step].mae.toFixed(4);
+        const best = Math.min(...rows.map((other) => other.steps[step].mae));
+        if (row.steps[step].mae === best) cell.className = 'best';
+      }
+    }
+  }
+
+  // ---- Loading -----------------------------------------------------------------------------
+
+  function setStatus(text, isError) {
+    $('status').textContent = text;
+    $('status').classList.toggle('error', Boolean(isError));
+  }
+
+  function fail(error) {
+    console.error(error);
+    app.failed = true;
+    setPlaying(false);
+    $('idle-note').hidden = true;
+    $('panels').hidden = true;
+    $('compare').hidden = true;
+    $('chart-section').hidden = true;
+    $('layout').classList.remove('ready');
+    if (app.manifest && app.manifest.clip) {
+      showClip();
+      setStatus(
+        'The models could not run in this browser, so this is a recording of the same ' +
+          `comparison. (${error.message})`,
+        true
+      );
+    } else {
+      setStatus(`The demo could not start. (${error.message})`, true);
+    }
+  }
+
+  function showClip() {
+    const clip = $('clip');
+    clip.onerror = () => {
+      clip.hidden = true;
+    };
+    clip.src = app.manifest.clip;
+    clip.hidden = false;
+  }
+
+  async function load() {
+    const response = await fetch('manifest.json');
+    if (!response.ok) {
+      throw new Error('No exported models here yet. Run "python export_demo.py" first.');
+    }
+    app.manifest = await response.json();
+    showClip();
+
+    if (typeof ort === 'undefined') throw new Error('ONNX Runtime Web did not load.');
+    // GitHub Pages cannot serve the headers that WebAssembly threads need, so use one thread.
+    ort.env.wasm.numThreads = 1;
+    ort.env.wasm.wasmPaths = new URL('vendor/', document.baseURI).href;
+
+    for (const entry of app.manifest.models) {
+      app.models.push(await loadModel(entry, app.manifest));
+    }
+    app.episodes = await Promise.all(
+      app.manifest.episodes.map((entry) => loadEpisode(entry, app.manifest))
+    );
+    app.episodes.forEach((episode, index) => {
+      for (const start of episode.starts) app.scenes.push({ episode: index, start });
+    });
+    if (!app.scenes.length) throw new Error('The export has no episodes to play.');
+
+    buildPanels();
+    buildPlayMode();
+    buildControls();
+    buildLegend();
+    buildAbout();
+    setRealFrameInterval(DEFAULTS.interval);
+    setSpeed(DEFAULTS.speed);
+    $('about').hidden = false;
+    $('clip').hidden = true;
+    $('panels').hidden = false;
+    $('compare').hidden = false;
+    $('chart-section').hidden = false;
+    $('layout').classList.add('ready');
+    $('view-tabs').hidden = false;
+    setStatus('');
+    startScene(0);
+    window.addEventListener('resize', drawChart);
+  }
+
+  // ---- For the tests in test_demo_page.py --------------------------------------------------
+
+  // Plays every exported episode the way the fixture in manifest.json was computed, without
+  // drawing, and returns the mean error at each step. Playback goes back to its start.
+  function measure(interval) {
+    return enqueue(async () => {
+      const stats = new ErrorStats();
+      let rollouts = 0;
+      for (const episode of app.episodes) {
+        const player = new Player(app.models, episode, app.manifest.fixture.first_frame, interval);
+        for (let result = await player.step(); result; result = await player.step()) {
+          stats.add(result.k, result.errors);
+          if (result.k === 1) rollouts += 1;
+        }
+      }
+      startScene(app.scene);
+      return { rollouts, mae: stats.means() };
+    });
+  }
+
+  const ready = load().then(() => {
+    if (params.get('view') === 'play') setView('play');
+    setPlaying(app.mode === 'compare' && params.get('autoplay') !== '0');
+    watchForIdle();
+    return true;
+  });
+  ready.catch(fail);
+
+  window.tinydoom = {
+    ready,
+    measure,
+    frameBytes: (episode, t) => {
+      const rgba = app.episodes[episode].rgba(t);
+      return Array.from(rgba.filter((_, i) => i % 4 !== 3));
+    },
+    state: () => ({
+      playing: app.playing,
+      mode: app.mode,
+      scene: app.scene,
+      episode: app.player ? app.player.episode.id : null,
+      t: app.player ? app.player.t : null,
+      k: app.player ? app.player.k : null,
+      interval: app.interval,
+      speed: app.speed,
+      playSteps: app.playSteps,
+      playScene: app.playScene,
+    }),
+    setView,
+    timings: () => app.timings.slice(),
+    playStepOnce: (action) => {
+      if (app.mode !== 'play') setView('play');
+      return enqueue(() => playDriveStep(action));
+    },
+    playPanelBytes: (series) => {
+      const panel = app.playPanels[series];
+      if (!panel) throw new Error(`Unknown play panel ${series}`);
+      const data = panel.context.getImageData(0, 0, panel.context.canvas.width, panel.context.canvas.height).data;
+      return Array.from(data);
+    },
+    playStartBytes: () => {
+      const scene = app.scenes[app.playScene];
+      const rgba = app.episodes[scene.episode].rgba(scene.start);
+      return Array.from(rgba.filter((_, i) => i % 4 !== 3));
+    },
+    playModelVisible: (name) => !app.playPanels[name].figure.hidden,
+  };
+})();
