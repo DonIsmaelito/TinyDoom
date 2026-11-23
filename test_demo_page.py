@@ -110,6 +110,11 @@ def pictures(page):
     )
 
 
+def open_play(page):
+    page.click("#view-play")
+    page.wait_for_function("() => window.tinydoom.state().mode === 'play'")
+
+
 def test_page_error_matches_the_fixture(context, site):
     """With a real frame every 10 steps, the page's MAE at 1, 5, and 10 is evaluate.py's.
 
@@ -232,6 +237,132 @@ def test_clip_is_shown_when_the_models_cannot_load(context, site):
     assert page.is_visible("#clip") and not page.is_visible("#panels")
     assert not page.is_visible("#compare") and not page.is_visible("#chart-section")
     page.wait_for_function("() => document.getElementById('clip').naturalWidth > 0")
+
+
+def test_play_action_changes_the_model_frame(context, site):
+    page = open_page(context, site)
+    open_play(page)
+    start = page.evaluate("() => window.tinydoom.playPanelBytes('cnn')")
+    page.evaluate("() => window.tinydoom.playStepOnce(0)")
+    after = page.evaluate("() => window.tinydoom.playPanelBytes('cnn')")
+    assert start != after
+    assert page.evaluate("() => window.tinydoom.state().playSteps") == 1
+
+
+def test_play_left_and_right_differ(context, site):
+    page = open_page(context, site)
+    open_play(page)
+    page.evaluate("() => window.tinydoom.playStepOnce(1)")
+    left = page.evaluate("() => window.tinydoom.playPanelBytes('convgru')")
+    page.click("#play-reset")
+    page.wait_for_function("() => window.tinydoom.state().playSteps === 0")
+    page.evaluate("() => window.tinydoom.playStepOnce(2)")
+    right = page.evaluate("() => window.tinydoom.playPanelBytes('convgru')")
+    assert left != right
+
+
+def test_play_reset_restores_start_frame(context, site):
+    page = open_page(context, site)
+    open_play(page)
+    start = page.evaluate("() => window.tinydoom.playPanelBytes('cnn')")
+    page.evaluate("() => window.tinydoom.playStepOnce(0)")
+    page.evaluate("() => window.tinydoom.playStepOnce(0)")
+    assert page.evaluate("() => window.tinydoom.state().playSteps") == 2
+    page.click("#play-reset")
+    page.wait_for_function("() => window.tinydoom.state().playSteps === 0")
+    assert page.evaluate("() => window.tinydoom.playPanelBytes('cnn')") == start
+
+
+def test_play_model_switch_hides_panel(context, site):
+    page = open_page(context, site)
+    open_play(page)
+    page.select_option("#play-model", "cnn")
+    assert page.evaluate("() => window.tinydoom.playModelVisible('cnn')")
+    assert not page.evaluate("() => window.tinydoom.playModelVisible('convgru')")
+    page.select_option("#play-model", "convgru")
+    assert page.evaluate("() => window.tinydoom.playModelVisible('convgru')")
+    assert not page.evaluate("() => window.tinydoom.playModelVisible('cnn')")
+    page.select_option("#play-model", "both")
+    assert page.evaluate("() => window.tinydoom.playModelVisible('cnn')")
+    assert page.evaluate("() => window.tinydoom.playModelVisible('convgru')")
+
+
+def test_play_start_frame_picker_changes_scene(context, site):
+    page = open_page(context, site)
+    open_play(page)
+    scenes = page.locator("#play-scene option").count()
+    page.select_option("#play-scene", str(scenes - 1))
+    page.wait_for_function(
+        "s => window.tinydoom.state().playScene === Number(s) && window.tinydoom.state().playSteps === 0",
+        arg=scenes - 1,
+    )
+    expected = page.evaluate(
+        """([i]) => {
+            const o = document.getElementById('play-scene').options[i];
+            return o.textContent;
+        }""",
+        [scenes - 1],
+    )
+    assert "episode" in expected.lower() or "," in expected
+
+
+def test_play_mode_keeps_requests_on_localhost(context, site):
+    urls = []
+    context.on("request", lambda request: urls.append(request.url))
+    page = open_page(context, site)
+    open_play(page)
+    page.evaluate("() => window.tinydoom.playStepOnce(0)")
+    page.evaluate("() => window.tinydoom.playStepOnce(2)")
+    hosts = {urlparse(url).hostname for url in urls if urlparse(url).scheme in ("http", "https")}
+    assert hosts == {"127.0.0.1"}, sorted(urls)
+
+
+@pytest.fixture(scope="module")
+def site_subpath(tmp_path_factory):
+    """Serve at /TinyDoom/demo/index.html (GitHub project site from the branch root)."""
+    work_dir = tmp_path_factory.mktemp("subpath")
+    repo_slug = work_dir / "TinyDoom"
+    demo_dir = repo_slug / "demo"
+    demo_dir.mkdir(parents=True)
+    for name in STATIC_FILES:
+        source = DEMO_DIR / name
+        target = demo_dir / name
+        if source.is_dir():
+            shutil.copytree(source, target)
+        else:
+            shutil.copy(source, target)
+    export_random_demo(work_dir, demo_dir)
+    handler = functools.partial(QuietHandler, directory=str(work_dir))
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield {
+        "url": f"http://127.0.0.1:{server.server_address[1]}/TinyDoom/demo/index.html",
+    }
+    server.shutdown()
+
+
+def test_page_loads_under_project_pages_subpath(browser, site_subpath):
+    """Relative fetches work when the page lives at /TinyDoom/demo/ (branch-root deploy)."""
+    context = browser.new_context(viewport={"width": 1280, "height": 900})
+    context.set_default_timeout(120_000)
+    page = context.new_page()
+    page.goto(site_subpath["url"] + "?autoplay=0&idle=0")
+    page.wait_for_function("() => window.tinydoom.ready")
+    worst = page.evaluate(
+        """async () => {
+            const m = await window.tinydoom.measure(10);
+            const fx = (await (await fetch('manifest.json')).json()).fixture;
+            let w = 0;
+            for (const name of ['cnn', 'convgru', 'repeat_last_frame']) {
+              for (const step of [1, 5, 10]) {
+                w = Math.max(w, Math.abs(m.mae[name][step] - fx[name][String(step)].mae));
+              }
+            }
+            return w;
+        }"""
+    )
+    context.close()
+    assert worst < 1e-5, worst
 
 
 def test_page_says_so_when_nothing_was_exported(context, site):

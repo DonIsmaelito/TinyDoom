@@ -1,0 +1,39 @@
+# Publishes the contents of demo/ to GitHub Pages (GitHub Actions source, not branch /docs).
+#
+# Owner setup: Settings → Pages → Build and deployment → Source: GitHub Actions.
+# After PR #1 and this PR merge to main, a push to main that touches demo/ runs this workflow.
+# Expected URL for a project site: https://donismaelito.github.io/TinyDoom/
+name: Deploy demo to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "demo/**"
+      - ".github/workflows/deploy-demo-pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Upload demo folder
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: demo
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

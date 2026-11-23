@@ -181,8 +181,11 @@ On the page:
   frames each model predicts from its own last prediction. When the ConvGRU is shown a real
   frame, its memory is emptied and it observes that frame and the three before it.
 - **Compare** (default): recorded episodes, chart, and how often the models see a real frame.
-- **Play**: hold an arrow key or a button to move from a real start frame. The models only see
-  their own predictions, so the picture softens after a few steps without **Reset to real frame**.
+- **Play**: hold an **arrow key** or an on-screen button (forward, turn left, turn right) to
+  move at game speed from a real start frame. Pick the **Model** (both, CNN only, or ConvGRU
+  only) and **Start from** episode. **Reset to real frame** restores the start and clears the
+  step counter. The models only see their own predictions, so the picture softens after a few
+  steps (see the gate note in the project store).
 - **Episode**: the exported episodes and their start frames.
 - **The chart** plots each model's mean absolute error against the number of steps since the
   models last saw a real frame, measured as the page plays. The dashed line is the reference
@@ -196,10 +199,26 @@ itself, and `autoplay=0` starts the page paused.
 
 ### GitHub Pages
 
-After merging the demo branch, turn on Pages from the repo **Settings → Pages**: choose branch
-`main` (or `cursor/tinydoom-pipeline-a456` after merge) and folder **`/demo`**, then save. The
-site URL will be `https://donismaelito.github.io/TinyDoom/` (or the org equivalent). This makes
-the ONNX files and test episode images public.
+GitHub's **Deploy from a branch** UI only allows the repository root or **`/docs`**, not
+`demo/`. This repo uses a **GitHub Actions** workflow instead:
+`.github/workflows/deploy-demo-pages.yml` uploads the **`demo/`** folder as the site root.
+
+**Owner steps (once PR #1 and the demo PR are on `main`):**
+
+1. Open **Settings → Pages**.
+2. Under **Build and deployment**, set **Source** to **GitHub Actions** (not "Deploy from a
+   branch").
+3. Merge or push to **`main`** so the workflow runs (or run **Actions → Deploy demo to GitHub
+   Pages → Run workflow**).
+4. After the workflow succeeds, open the Pages URL shown on that run. For this repository the
+   expected project-site URL is **`https://donismaelito.github.io/TinyDoom/`** (repo name
+   `TinyDoom` under `DonIsmaelito`).
+
+**Fallback without Actions:** serve the branch root and open
+`https://donismaelito.github.io/TinyDoom/demo/` after both PRs are on `main` (slower first
+load, same relative paths). The page tests include a check at `/TinyDoom/demo/index.html`.
+
+Publishing makes the ONNX weights and test episode images public.
 
 The page runs the models with ONNX Runtime Web on one WebAssembly thread. Its files are stored
 in `demo/vendor/` (about 15 MB), so the page loads nothing from other sites.
@@ -213,11 +232,10 @@ real size and synthetic episodes.
   output names, shapes, and types, that the episode images decode to the stored frames, and
   that the numbers in `manifest.json` are what `evaluate.py` computes.
 - `test_demo_page.py` opens the page in headless Chrome. It needs `pip install playwright`
-  and Chrome (or `playwright install chromium`), and is skipped without them. It checks that
-  the page's error at 1, 5, and 10 steps equals the exported `evaluate.py` numbers, that
-  Reset gives the same pictures again, that no request leaves `localhost`, that both models
-  plus drawing take less than the 114 ms the game takes per step, and that the clip appears
-  when the models cannot load.
+  and Chrome (or `playwright install chromium`), and is skipped without them. It checks
+  Compare mode (fixture MAE, reset, timing, localhost-only requests) and **Play** mode (an
+  action changes the frame, left and right differ, reset restores the start, model switch,
+  localhost-only). Optional: `playwright install firefox webkit` for cross-browser runs.
 
 ## Files
 

@@ -1009,8 +1009,25 @@
       interval: app.interval,
       speed: app.speed,
       playSteps: app.playSteps,
+      playScene: app.playScene,
     }),
     setView,
     timings: () => app.timings.slice(),
+    playStepOnce: (action) => {
+      if (app.mode !== 'play') setView('play');
+      return enqueue(() => playDriveStep(action));
+    },
+    playPanelBytes: (series) => {
+      const panel = app.playPanels[series];
+      if (!panel) throw new Error(`Unknown play panel ${series}`);
+      const data = panel.context.getImageData(0, 0, panel.context.canvas.width, panel.context.canvas.height).data;
+      return Array.from(data);
+    },
+    playStartBytes: () => {
+      const scene = app.scenes[app.playScene];
+      const rgba = app.episodes[scene.episode].rgba(scene.start);
+      return Array.from(rgba.filter((_, i) => i % 4 !== 3));
+    },
+    playModelVisible: (name) => !app.playPanels[name].figure.hidden,
   };
 })();
