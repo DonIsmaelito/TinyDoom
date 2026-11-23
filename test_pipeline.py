@@ -223,3 +223,35 @@ def test_collect_real_episodes(tmp_path):
             assert ep.positions.shape == (len(ep) + 1, 3)
             assert ep.angles.shape == (len(ep) + 1,)
             assert not np.array_equal(ep.frames[0], ep.frames[-1])
+
+
+def test_collect_train_append(tmp_path):
+    pytest.importorskip("vizdoom")
+    from collect import collect, collect_train_append, episode_fingerprint, load_fingerprints
+
+    collect(tmp_path, num_episodes=6, max_actions=12)
+    val_before = {
+        p.name: p.read_bytes() for p in sorted((tmp_path / "val").glob("episode_*.npz"))
+    }
+    test_before = {
+        p.name: p.read_bytes() for p in sorted((tmp_path / "test").glob("episode_*.npz"))
+    }
+    train_ids_before = {ep.episode_id for ep in load_episodes(tmp_path, "train")}
+    fps_before = set(load_fingerprints(tmp_path))
+
+    metadata = collect_train_append(
+        tmp_path, num_train=2, start_episode_id=6, max_actions=12, seed=0
+    )
+    assert metadata["episodes"]["train"] == len(train_ids_before) + 2
+    assert metadata["episodes"]["val"] == 1
+    assert metadata["episodes"]["test"] == 1
+    val_after = {p.name: p.read_bytes() for p in sorted((tmp_path / "val").glob("episode_*.npz"))}
+    test_after = {p.name: p.read_bytes() for p in sorted((tmp_path / "test").glob("episode_*.npz"))}
+    assert val_after == val_before
+    assert test_after == test_before
+
+    train_ids_after = {ep.episode_id for ep in load_episodes(tmp_path, "train")}
+    assert train_ids_after - train_ids_before == {6, 7}
+    fps_after = set(load_fingerprints(tmp_path))
+    assert len(fps_after) == len(fps_before) + 2
+    assert fps_before.isdisjoint(fps_after - fps_before)
