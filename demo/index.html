@@ -18,6 +18,11 @@
       </p>
     </header>
 
+    <nav class="view-tabs" id="view-tabs" hidden>
+      <button type="button" id="view-compare" class="active">Compare on recorded episodes</button>
+      <button type="button" id="view-play">Play: hold a key to move</button>
+    </nav>
+
     <div id="layout" class="layout">
       <div class="main-column">
         <section id="stage" aria-live="polite">
@@ -65,6 +70,33 @@
             <span id="idle-note" class="idle-note" hidden></span>
           </div>
         </section>
+
+        <section id="play-mode" class="play-mode" hidden>
+          <p class="hint play-hint">
+            Hold an arrow key or a button to move. The models only see their own predictions, so
+            the picture softens after a few steps. <strong>Reset</strong> jumps back to the real
+            frame below.
+          </p>
+          <div class="play-panels" id="play-panels"></div>
+          <p id="play-counter" class="counter play-counter">
+            <span id="play-steps" class="steps">0</span>
+            <span>steps on the model's predictions</span>
+          </p>
+          <div class="play-controls">
+            <div class="hold-keys" id="hold-keys"></div>
+            <label>Model
+              <select id="play-model">
+                <option value="both">CNN and ConvGRU</option>
+                <option value="cnn">CNN only</option>
+                <option value="convgru">ConvGRU only</option>
+              </select>
+            </label>
+            <label>Start from
+              <select id="play-scene"></select>
+            </label>
+            <button type="button" id="play-reset">Reset to real frame</button>
+          </div>
+        </section>
       </div>
 
       <section id="chart-section" class="chart-box" hidden>
@@ -97,7 +129,8 @@
             actions: forward, turn left, and turn right.</li>
           <li>The episodes here are test episodes that the models were not trained on, but they
             come from the same map.</li>
-          <li>The actions are recorded. You cannot steer the models on this page.</li>
+          <li>Compare mode uses recorded actions. Play mode lets you hold a key to move, but only
+            from a fixed real start frame, with no new real frames.</li>
           <li>A blurry picture can still have a low error, so judge the pictures as well as the
             chart.</li>
           <li>The chart covers only the few episodes played on this page. The table gives the

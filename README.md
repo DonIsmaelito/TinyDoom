@@ -180,6 +180,9 @@ On the page:
 - **Show the models a real frame**: every 1, 5, 10, or 30 steps, or never again. Between real
   frames each model predicts from its own last prediction. When the ConvGRU is shown a real
   frame, its memory is emptied and it observes that frame and the three before it.
+- **Compare** (default): recorded episodes, chart, and how often the models see a real frame.
+- **Play**: hold an arrow key or a button to move from a real start frame. The models only see
+  their own predictions, so the picture softens after a few steps without **Reset to real frame**.
 - **Episode**: the exported episodes and their start frames.
 - **The chart** plots each model's mean absolute error against the number of steps since the
   models last saw a real frame, measured as the page plays. The dashed line is the reference
@@ -188,8 +191,15 @@ On the page:
   also returns to the default speed and real-frame setting.
 
 The address can change the defaults, for example
-`http://localhost:8000/?interval=5&speed=8.75&idle=60`. `idle=0` turns off playing by itself,
-and `autoplay=0` starts the page paused.
+`http://localhost:8000/?interval=5&speed=8.75&idle=60&view=play`. `idle=0` turns off playing by
+itself, and `autoplay=0` starts the page paused.
+
+### GitHub Pages
+
+After merging the demo branch, turn on Pages from the repo **Settings → Pages**: choose branch
+`main` (or `cursor/tinydoom-pipeline-a456` after merge) and folder **`/demo`**, then save. The
+site URL will be `https://donismaelito.github.io/TinyDoom/` (or the org equivalent). This makes
+the ONNX files and test episode images public.
 
 The page runs the models with ONNX Runtime Web on one WebAssembly thread. Its files are stored
 in `demo/vendor/` (about 15 MB), so the page loads nothing from other sites.

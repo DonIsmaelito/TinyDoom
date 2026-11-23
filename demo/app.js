@@ -265,6 +265,13 @@
     loop: 0,
     timings: [],
     panels: {},
+    mode: 'compare',
+    playScene: 0,
+    playSteps: 0,
+    playHolding: null,
+    playLoop: 0,
+    playPanels: {},
+    playModelFilter: 'both',
   };
 
   // The models run one call at a time. Everything that uses them goes through this queue.
@@ -279,10 +286,10 @@
     return count >= 1e6 ? `${(count / 1e6).toFixed(1)}M` : `${Math.round(count / 1e3)}K`;
   }
 
-  function addPanel(series, name, about) {
+  function addPanelTo(parent, store, series, name, about, extraClass) {
     const size = app.manifest.frame_size;
     const figure = document.createElement('figure');
-    figure.className = 'panel';
+    figure.className = 'panel' + (extraClass ? ` ${extraClass}` : '');
     figure.dataset.series = series;
     const canvas = document.createElement('canvas');
     canvas.width = size;
@@ -294,22 +301,193 @@
     const detail = document.createElement('span');
     detail.className = 'about';
     detail.textContent = about;
-    const now = document.createElement('span');
-    now.className = 'now';
-    caption.append(title, detail, now);
+    caption.append(title, detail);
     figure.append(canvas, caption);
-    $('panels').append(figure);
+    parent.append(figure);
     const context = canvas.getContext('2d');
-    app.panels[series] = { figure, context, now, image: context.createImageData(size, size) };
+    store[series] = { figure, context, image: context.createImageData(size, size) };
   }
 
   function buildPanels() {
-    addPanel('real', 'Real game', 'what the game actually showed');
+    const size = app.manifest.frame_size;
+    function panel(parent, store, series, name, about, extraClass) {
+      addPanelTo(parent, store, series, name, about, extraClass);
+      const now = document.createElement('span');
+      now.className = 'now';
+      store[series].figure.querySelector('figcaption').append(now);
+      store[series].now = now;
+    }
+    panel($('panels'), app.panels, 'real', 'Real game', 'what the game actually showed');
     for (const model of app.models) {
       const memory = model.hiddenShape
         ? 'remembers earlier frames'
         : 'sees only its current frame';
-      addPanel(model.name, model.label, `${parameterText(model.parameters)} parameters, ${memory}`);
+      panel(
+        $('panels'),
+        app.panels,
+        model.name,
+        model.label,
+        `${parameterText(model.parameters)} parameters, ${memory}`
+      );
+    }
+  }
+
+  function drawPanel(store, series, rgba) {
+    const { context, image } = store[series];
+    image.data.set(rgba);
+    context.putImageData(image, 0, 0);
+  }
+
+  function drawPanelFloat(store, series, chw) {
+    const { context, image } = store[series];
+    const data = image.data;
+    const n = chw.length / 3;
+    for (let i = 0; i < n; i++) {
+      data[4 * i] = chw[i] * 255;
+      data[4 * i + 1] = chw[n + i] * 255;
+      data[4 * i + 2] = chw[2 * n + i] * 255;
+      data[4 * i + 3] = 255;
+    }
+    context.putImageData(image, 0, 0);
+  }
+
+  function buildPlayMode() {
+    addPanelTo(
+      $('play-panels'),
+      app.playPanels,
+      'real',
+      'Real start frame',
+      'where reset returns',
+      'real-anchor'
+    );
+    for (const model of app.models) {
+      const memory = model.hiddenShape ? 'memory on' : 'one frame only';
+      addPanelTo($('play-panels'), app.playPanels, model.name, model.label, memory);
+    }
+    const actions = [
+      ['ArrowUp', '0', 'forward'],
+      ['ArrowLeft', '1', 'turn left'],
+      ['ArrowRight', '2', 'turn right'],
+    ];
+    for (const [key, action, label] of actions) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'hold';
+      button.dataset.action = action;
+      button.dataset.key = key;
+      button.textContent = label;
+      $('hold-keys').append(button);
+    }
+    app.scenes.forEach((scene, index) => {
+      const option = document.createElement('option');
+      option.value = index;
+      option.textContent = `${app.episodes[scene.episode].id}, from frame ${scene.start}`;
+      $('play-scene').append(option);
+    });
+    $('play-model').addEventListener('change', (event) => {
+      app.playModelFilter = event.target.value;
+      updatePlayVisibility();
+    });
+    $('play-scene').addEventListener('change', (event) => {
+      app.playScene = Number(event.target.value);
+      resetPlay();
+    });
+    $('play-reset').addEventListener('click', () => resetPlay());
+    for (const button of $('hold-keys').children) {
+      const down = () => beginHold(Number(button.dataset.action), button);
+      const up = () => endHold(button);
+      button.addEventListener('pointerdown', (event) => {
+        event.preventDefault();
+        button.setPointerCapture(event.pointerId);
+        down();
+      });
+      button.addEventListener('pointerup', up);
+      button.addEventListener('pointercancel', up);
+    }
+    $('view-compare').addEventListener('click', () => setView('compare'));
+    $('view-play').addEventListener('click', () => setView('play'));
+  }
+
+  function updatePlayVisibility() {
+    for (const model of app.models) {
+      const show =
+        app.playModelFilter === 'both' || app.playModelFilter === model.name;
+      app.playPanels[model.name].figure.hidden = !show;
+    }
+  }
+
+  function setView(mode) {
+    app.mode = mode;
+    $('view-compare').classList.toggle('active', mode === 'compare');
+    $('view-play').classList.toggle('active', mode === 'play');
+    $('compare').classList.toggle('play-hidden', mode !== 'compare');
+    $('play-mode').hidden = mode !== 'play';
+    $('chart-section').classList.toggle('play-hidden', mode !== 'compare');
+    $('panels').hidden = mode !== 'compare';
+    if (mode === 'compare') {
+      app.playHolding = null;
+      app.playLoop += 1;
+      for (const button of $('hold-keys').children) button.classList.remove('pressed');
+      enqueue(() => startScene(app.scene));
+    } else {
+      setPlaying(false);
+      $('play-scene').value = app.playScene;
+      resetPlay();
+    }
+  }
+
+  function renderPlay(frames) {
+    const scene = app.scenes[app.playScene];
+    const episode = app.episodes[scene.episode];
+    drawPanel(app.playPanels, 'real', episode.rgba(scene.start));
+    for (const model of app.models) {
+      if (frames) drawPanelFloat(app.playPanels, model.name, frames[model.name]);
+      else drawPanel(app.playPanels, model.name, episode.rgba(scene.start));
+    }
+    $('play-steps').textContent = app.playSteps;
+    updatePlayVisibility();
+  }
+
+  function resetPlay() {
+    return enqueue(async () => {
+      const scene = app.scenes[app.playScene];
+      const episode = app.episodes[scene.episode];
+      for (const model of app.models) await model.showRealFrame(episode, scene.start);
+      app.playSteps = 0;
+      app.playHolding = null;
+      app.playLoop += 1;
+      for (const button of $('hold-keys').children) button.classList.remove('pressed');
+      renderPlay();
+    });
+  }
+
+  async function playDriveStep(action) {
+    const frames = {};
+    for (const model of app.models) frames[model.name] = await model.predict(action);
+    app.playSteps += 1;
+    renderPlay(frames);
+  }
+
+  function beginHold(action, button) {
+    if (app.mode !== 'play' || app.failed) return;
+    app.playHolding = action;
+    button.classList.add('pressed');
+    app.playLoop += 1;
+    playHoldLoop(app.playLoop).catch(fail);
+  }
+
+  function endHold(button) {
+    button.classList.remove('pressed');
+    if (Number(button.dataset.action) === app.playHolding) app.playHolding = null;
+  }
+
+  async function playHoldLoop(loop) {
+    const pace = 1000 / 8.75;
+    while (app.mode === 'play' && loop === app.playLoop && app.playHolding !== null) {
+      const started = performance.now();
+      const action = app.playHolding;
+      await enqueue(() => playDriveStep(action));
+      await sleep(Math.max(0, pace - (performance.now() - started)));
     }
   }
 
@@ -596,8 +774,17 @@
       const index = Number(event.target.value);
       enqueue(() => startScene(index));
     });
+    const arrowActions = { ArrowUp: 0, ArrowLeft: 1, ArrowRight: 2 };
     document.addEventListener('keydown', (event) => {
       if (event.ctrlKey || event.metaKey || event.altKey) return;
+      if (app.mode === 'play') {
+        if (Object.hasOwn(arrowActions, event.key)) {
+          event.preventDefault();
+          const button = [...$('hold-keys').children].find((b) => b.dataset.key === event.key);
+          if (button && app.playHolding !== arrowActions[event.key]) beginHold(arrowActions[event.key], button);
+        }
+        return;
+      }
       if (['BUTTON', 'SELECT', 'INPUT'].includes(event.target.tagName)) return;
       if (event.key === ' ') {
         event.preventDefault();
@@ -607,6 +794,11 @@
       } else if (event.key === 'r') {
         reset();
       }
+    });
+    document.addEventListener('keyup', (event) => {
+      if (app.mode !== 'play' || !Object.hasOwn(arrowActions, event.key)) return;
+      const button = [...$('hold-keys').children].find((b) => b.dataset.key === event.key);
+      if (button) endHold(button);
     });
   }
 
@@ -629,7 +821,7 @@
     setInterval(() => {
       const idle = (performance.now() - lastInput) / 1000;
       if (app.failed) return;
-      if (idle >= IDLE_SECONDS && !app.playing) setPlaying(true);
+      if (app.mode === 'compare' && idle >= IDLE_SECONDS && !app.playing) setPlaying(true);
       if (idle >= 6 * IDLE_SECONDS) {
         if (app.interval !== DEFAULTS.interval) setRealFrameInterval(DEFAULTS.interval);
         if (app.speed !== DEFAULTS.speed) setSpeed(DEFAULTS.speed);
@@ -754,6 +946,7 @@
     if (!app.scenes.length) throw new Error('The export has no episodes to play.');
 
     buildPanels();
+    buildPlayMode();
     buildControls();
     buildLegend();
     buildAbout();
@@ -765,6 +958,7 @@
     $('compare').hidden = false;
     $('chart-section').hidden = false;
     $('layout').classList.add('ready');
+    $('view-tabs').hidden = false;
     setStatus('');
     startScene(0);
     window.addEventListener('resize', drawChart);
@@ -791,7 +985,8 @@
   }
 
   const ready = load().then(() => {
-    setPlaying(params.get('autoplay') !== '0');
+    if (params.get('view') === 'play') setView('play');
+    setPlaying(app.mode === 'compare' && params.get('autoplay') !== '0');
     watchForIdle();
     return true;
   });
@@ -806,13 +1001,16 @@
     },
     state: () => ({
       playing: app.playing,
+      mode: app.mode,
       scene: app.scene,
-      episode: app.player.episode.id,
-      t: app.player.t,
-      k: app.player.k,
+      episode: app.player ? app.player.episode.id : null,
+      t: app.player ? app.player.t : null,
+      k: app.player ? app.player.k : null,
       interval: app.interval,
       speed: app.speed,
+      playSteps: app.playSteps,
     }),
+    setView,
     timings: () => app.timings.slice(),
   };
 })();

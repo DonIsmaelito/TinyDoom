@@ -278,6 +278,81 @@ h2.second {
   line-height: 1.35;
 }
 
+.view-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.view-tabs[hidden] {
+  display: none;
+}
+
+.view-tabs button {
+  flex: 1 1 200px;
+  min-height: 48px;
+  font-weight: 700;
+}
+
+.view-tabs button.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #101014;
+}
+
+.play-mode[hidden],
+#compare.play-hidden,
+#chart-section.play-hidden {
+  display: none;
+}
+
+.play-hint {
+  margin-top: 0;
+}
+
+.play-panels {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.play-panels .panel.real-anchor {
+  border-color: var(--muted);
+}
+
+.play-counter {
+  margin: 16px 0;
+}
+
+.play-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 18px;
+  padding: 14px;
+  background: var(--panel);
+  border: 2px solid var(--line);
+  border-radius: 10px;
+}
+
+.hold-keys {
+  display: flex;
+  gap: 8px;
+}
+
+.hold-keys .hold {
+  min-width: 110px;
+  font-weight: 700;
+}
+
+.hold-keys .hold.pressed {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #101014;
+}
+
 .idle-note {
   color: var(--muted);
   font-size: 0.95rem;
