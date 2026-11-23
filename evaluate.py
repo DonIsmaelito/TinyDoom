@@ -8,6 +8,9 @@ A rollout starts at a frame that has 3 real frames before it and 10 recorded act
 The model then predicts 10 frames from the actions alone, feeding its own predictions back in.
 Every model is scored on the same rollouts: the ConvGRU observes all 4 real frames first, the
 CNN starts from the last of them. Every possible start frame in the split is used.
+
+The last table is a reference that needs no model: it repeats the last real frame for all 10
+steps. A model is only useful where it beats this.
 """
 
 import argparse
@@ -33,11 +36,22 @@ def frame_metrics(prediction, target):
     return mae, psnr
 
 
+def repeat_last_frame(context, actions):
+    """The reference that needs no model: every predicted frame is the last real frame."""
+    steps = actions.shape[1] - context.shape[1] + 1
+    return context[:, -1:].expand(-1, steps, -1, -1, -1)
+
+
 @torch.no_grad()
-def evaluate(model, episodes, device="cpu", steps=STEPS, batch_size=64):
-    """Mean MAE and PSNR over all rollouts at each step in steps."""
-    model.eval()
-    windows = WindowDataset(episodes, context_frames=CONTEXT_FRAMES, rollout_steps=max(steps))
+def score_rollouts(predict, episodes, device="cpu", steps=STEPS, batch_size=64, stride=1):
+    """Mean MAE and PSNR over all rollouts at each step in steps.
+
+    predict(context, actions) returns the predicted frames, like `rollout` does for a model.
+    With stride S, only every S-th start frame of each episode is used.
+    """
+    windows = WindowDataset(
+        episodes, context_frames=CONTEXT_FRAMES, rollout_steps=max(steps), stride=stride
+    )
     if len(windows) == 0:
         raise ValueError(
             f"No episode has {CONTEXT_FRAMES} frames followed by {max(steps)} actions."
@@ -45,7 +59,7 @@ def evaluate(model, episodes, device="cpu", steps=STEPS, batch_size=64):
     index = [s - 1 for s in steps]
     maes, psnrs = [], []
     for context, actions, targets in DataLoader(windows, batch_size=batch_size):
-        prediction = rollout(model, to_float(context.to(device)), actions.to(device))
+        prediction = predict(to_float(context.to(device)), actions.to(device))
         mae, psnr = frame_metrics(
             prediction[:, index].clamp(0.0, 1.0), to_float(targets[:, index].to(device))
         )
@@ -59,6 +73,30 @@ def evaluate(model, episodes, device="cpu", steps=STEPS, batch_size=64):
             str(s): {"mae": mae[j].item(), "psnr": psnr[j].item()} for j, s in enumerate(steps)
         },
     }
+
+
+def evaluate(model, episodes, device="cpu", steps=STEPS, batch_size=64, stride=1):
+    """Mean MAE and PSNR of the model's rollouts at each step in steps."""
+    model.eval()
+    return score_rollouts(
+        lambda context, actions: rollout(model, context, actions),
+        episodes,
+        device,
+        steps,
+        batch_size,
+        stride,
+    )
+
+
+def evaluate_repeat_last_frame(episodes, device="cpu", steps=STEPS, batch_size=64, stride=1):
+    """The same metrics on the same rollouts for repeating the last real frame."""
+    return score_rollouts(repeat_last_frame, episodes, device, steps, batch_size, stride)
+
+
+def print_table(result):
+    print(f"{'step':>4}  {'MAE':>8}  {'PSNR':>6}")
+    for step, m in result["steps"].items():
+        print(f"{step:>4}  {m['mae']:8.5f}  {m['psnr']:6.2f}")
 
 
 def load_model(checkpoint_path, device):
@@ -82,6 +120,7 @@ def main():
     print(f"split {args.split}: {len(episodes)} episodes")
     print("MAE is on pixel values in [0, 1]. PSNR is in dB, averaged over frames.")
 
+    reference = evaluate_repeat_last_frame(episodes, device)
     results = []
     for path in args.checkpoint:
         model, checkpoint = load_model(path, device)
@@ -90,12 +129,19 @@ def main():
             f"\n{path}: model {checkpoint['model']}, epoch {checkpoint['epoch']}, "
             f"val L1 {checkpoint['val_loss']:.5f}, {result['rollouts']} rollouts"
         )
-        print(f"{'step':>4}  {'MAE':>8}  {'PSNR':>6}")
-        for step, m in result["steps"].items():
-            print(f"{step:>4}  {m['mae']:8.5f}  {m['psnr']:6.2f}")
+        print_table(result)
         results.append(
-            dict(checkpoint=path, model=checkpoint["model"], split=args.split, **result)
+            dict(
+                checkpoint=path,
+                model=checkpoint["model"],
+                split=args.split,
+                **result,
+                repeat_last_frame=reference["steps"],
+            )
         )
+
+    print(f"\nrepeat the last real frame (reference, no model), {reference['rollouts']} rollouts")
+    print_table(reference)
 
     if args.out:
         with open(args.out, "w") as f:

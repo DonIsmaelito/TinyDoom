@@ -134,6 +134,10 @@ its start frame so that the ConvGRU can observe four, and the CNN starts from th
 those four. Every start frame in the split that leaves room for 10 steps is used. Predictions
 are clamped to the range 0 to 1.
 
+After the models, the script prints the same metrics for a reference that needs no model: it
+repeats the last real frame for all 10 steps. A model is only useful where it beats this. With
+`--out`, each model's entry also carries these numbers under `repeat_last_frame`.
+
 ## Files
 
 | File | Purpose |

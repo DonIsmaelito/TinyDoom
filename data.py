@@ -99,9 +99,10 @@ class WindowDataset(Dataset):
 
     With C = 1 and K = 1 this is the plain (current frame, action, next frame) example.
     Windows never cross an episode boundary. Episodes that are too short give no windows.
+    Every possible frame t is used. With stride S, only every S-th one in each episode is.
     """
 
-    def __init__(self, episodes, context_frames=1, rollout_steps=1):
+    def __init__(self, episodes, context_frames=1, rollout_steps=1, stride=1):
         self.context_frames = context_frames
         self.rollout_steps = rollout_steps
         frames = np.concatenate([ep.frames for ep in episodes])
@@ -112,7 +113,7 @@ class WindowDataset(Dataset):
         offset = 0
         for ep in episodes:
             actions.append(np.append(ep.actions, 0))
-            t = np.arange(context_frames - 1, len(ep) - rollout_steps + 1)
+            t = np.arange(context_frames - 1, len(ep) - rollout_steps + 1, stride)
             current.append(offset + t)
             offset += len(ep) + 1
         self.actions = torch.from_numpy(np.concatenate(actions))

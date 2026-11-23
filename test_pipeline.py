@@ -21,7 +21,7 @@ from data import (
     save_episode,
     split_counts,
 )
-from evaluate import evaluate, frame_metrics
+from evaluate import evaluate, evaluate_repeat_last_frame, frame_metrics
 from model import build_model, count_parameters, rollout
 from train import prediction_loss
 
@@ -196,6 +196,12 @@ def test_rollout_evaluation_reports_mae_and_psnr_at_1_5_10():
     for step in (1, 5, 10):
         assert frozen["steps"][str(step)]["mae"] == pytest.approx(step / 255, rel=1e-4)
     assert frozen["steps"]["1"]["psnr"] > frozen["steps"]["5"]["psnr"] > frozen["steps"]["10"]["psnr"]
+
+    # The reference that repeats the last real frame is exactly that model, with no model.
+    assert evaluate_repeat_last_frame(episodes) == frozen
+
+    # With a stride, only every 5th start frame of each episode is a rollout: frames 3 and 8.
+    assert evaluate(Brighten(0.0), episodes, stride=5)["rollouts"] == 2 * 2
 
 
 @pytest.mark.parametrize("name", sorted(PARAMETERS))
