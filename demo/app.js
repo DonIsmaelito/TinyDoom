@@ -397,10 +397,10 @@
     }
   }
 
-  // A round number at or above value, for the top of the error axis.
+  // A number at or above value whose quarters are short to print, for the top of the axis.
   function niceCeiling(value) {
     const unit = 10 ** Math.floor(Math.log10(value));
-    for (const m of [1, 2, 2.5, 5, 10]) if (m * unit >= value) return m * unit;
+    for (const m of [1, 2, 4, 8, 10]) if (m * unit >= value) return m * unit;
     return 10 * unit;
   }
 
