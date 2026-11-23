@@ -21,7 +21,8 @@ from data import (
     save_episode,
     split_counts,
 )
-from evaluate import evaluate, frame_metrics
+from evaluate import collect_rollouts, evaluate, frame_metrics
+from gallery import run_gallery, select_rollouts, windows_overlap
 from model import build_model, count_parameters, rollout
 from train import prediction_loss
 
@@ -206,6 +207,99 @@ def test_rollout_evaluation_runs_for_each_model(name):
     for step in ("1", "5", "10"):
         assert np.isfinite(result["steps"][step]["mae"])
         assert np.isfinite(result["steps"][step]["psnr"])
+
+
+def test_collect_rollouts_step10_mae_matches_evaluate():
+    episodes = [make_episode(0, 20), make_episode(1, 18)]
+    torch.manual_seed(0)
+    model = build_model("cnn")
+    agg = evaluate(model, episodes, device="cpu")
+    records = collect_rollouts(model, episodes, device="cpu")
+    mean10 = sum(r["per_step_mae"][-1] for r in records) / len(records)
+    assert len(records) == agg["rollouts"]
+    assert mean10 == pytest.approx(agg["steps"]["10"]["mae"], rel=0, abs=1e-6)
+
+
+def test_select_rollouts_dedupes_overlapping_windows():
+    merged = []
+    for start in range(8, 18):
+        merged.append(
+            {
+                "episode_id": 57,
+                "start_index": start,
+                "rank_mae": 1.0 - start * 0.01,
+                "actions": [0] * 10,
+                "targets": None,
+                "models": {},
+            }
+        )
+    for start in range(30, 40):
+        merged.append(
+            {
+                "episode_id": 53,
+                "start_index": start,
+                "rank_mae": 0.5 - start * 0.001,
+                "actions": [0] * 10,
+                "targets": None,
+                "models": {},
+            }
+        )
+    selected, ranking = select_rollouts(merged, worst_k=8, best_k=2, dedupe_overlap=True)
+    worst = [r for r in selected if r["selection"] == "worst"]
+    assert len(worst) == 2
+    assert worst[0]["episode_id"] == 57 and worst[0]["start_index"] == 8
+    assert worst[1]["episode_id"] == 53 and worst[1]["start_index"] == 30
+    by_ep = {}
+    for item in worst:
+        by_ep.setdefault(item["episode_id"], []).append(item["start_index"])
+    for starts in by_ep.values():
+        for i, s0 in enumerate(starts):
+            for s1 in starts[i + 1 :]:
+                assert not windows_overlap(s0, s1)
+    assert len(ranking) == len(merged)
+    assert ranking[0]["start_index"] == 8
+
+    dense_worst, _ = select_rollouts(
+        merged, worst_k=8, best_k=0, dedupe_overlap=False
+    )
+    assert len(dense_worst) == 8
+    assert dense_worst[0]["start_index"] == 8
+    assert dense_worst[1]["start_index"] == 9
+
+
+def test_gallery_writes_strips_and_json(tmp_path):
+    episodes = [make_episode(0, 20), make_episode(1, 20)]
+    for ep in episodes:
+        save_episode(tmp_path, "test", ep)
+    loaded = load_episodes(tmp_path, "test")
+    torch.manual_seed(0)
+    model = build_model("cnn")
+    checkpoint = tmp_path / "cnn_untrained.pt"
+    torch.save(
+        {
+            "model": "cnn",
+            "state_dict": model.state_dict(),
+            "epoch": 0,
+            "val_loss": 1.0,
+        },
+        checkpoint,
+    )
+    out_dir = tmp_path / "gallery"
+    summary, strips, contacts, json_path = run_gallery(
+        [str(checkpoint)], loaded, "cpu", out_dir, worst_k=2, best_k=1, batch_size=8
+    )
+    agg = evaluate(model, loaded, device="cpu")
+    assert summary["mean_step10_mae_by_model"]["cnn"] == pytest.approx(
+        agg["steps"]["10"]["mae"], rel=0, abs=1e-6
+    )
+    assert len(strips) == 3
+    assert all(p.exists() for p in strips)
+    assert len(contacts) == 1 and contacts[0].exists()
+    assert json_path.exists()
+    assert len(summary["rollouts"]) == 3
+    for record in summary["rollouts"]:
+        assert len(record["actions"]) == 10
+        assert len(record["per_step_mae"]["cnn"]) == 10
 
 
 def test_collect_real_episodes(tmp_path):

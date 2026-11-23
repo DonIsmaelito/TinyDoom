@@ -108,15 +108,18 @@ class WindowDataset(Dataset):
         self.frames = torch.from_numpy(np.ascontiguousarray(frames.transpose(0, 3, 1, 2)))
 
         # Actions are padded to one per frame so that frame and action indices line up.
-        actions, current = [], []
+        actions, current, meta = [], [], []
         offset = 0
         for ep in episodes:
             actions.append(np.append(ep.actions, 0))
             t = np.arange(context_frames - 1, len(ep) - rollout_steps + 1)
             current.append(offset + t)
+            for frame_index in t:
+                meta.append((ep.episode_id, int(frame_index)))
             offset += len(ep) + 1
         self.actions = torch.from_numpy(np.concatenate(actions))
         self.current = torch.from_numpy(np.concatenate(current))
+        self.meta = meta
 
     def __len__(self):
         return len(self.current)

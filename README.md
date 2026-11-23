@@ -134,6 +134,26 @@ its start frame so that the ConvGRU can observe four, and the CNN starts from th
 those four. Every start frame in the split that leaves room for 10 steps is used. Predictions
 are clamped to the range 0 to 1.
 
+## Failure gallery (`gallery.py`)
+
+Poster-ready strips for the worst (and a few best) 10-step rollouts on the test split:
+
+```bash
+python gallery.py --checkpoint checkpoints/cnn_best.pt --out-dir gallery/
+python gallery.py --checkpoint checkpoints/cnn_best.pt checkpoints/convgru_best.pt
+```
+
+Rollouts are ranked by step-10 MAE (first checkpoint when several are passed). By default the
+gallery skips a rollout when its 10 predicted frames overlap a window already chosen from the
+same episode (`--no-dedupe-overlap` turns that off). The full ordering is kept in
+`gallery.json` as `raw_ranking`.
+
+Each strip has real frames on top, model predictions below, and a difference row. The
+difference row is the per-channel absolute value `|real − pred|` on uint8 RGB pixels, on a
+fixed 0–255 scale (no per-frame or per-strip normalization). Frames are upscaled with
+nearest-neighbor for legibility. The script also writes a contact sheet per checkpoint and
+`gallery.json` with episode id, start index, actions, and per-step MAE.
+
 ## Files
 
 | File | Purpose |
@@ -143,4 +163,5 @@ are clamped to the range 0 to 1.
 | `model.py` | both models and the shared rollout function |
 | `train.py` | training loop, saves the best checkpoint by validation loss |
 | `evaluate.py` | rollout evaluation, MAE and PSNR at 1, 5, and 10 steps |
+| `gallery.py` | failure gallery images and JSON for poster rollouts |
 | `test_pipeline.py` | pytest checks |

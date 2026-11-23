@@ -61,6 +61,41 @@ def evaluate(model, episodes, device="cpu", steps=STEPS, batch_size=64):
     }
 
 
+@torch.no_grad()
+def collect_rollouts(model, episodes, device="cpu", rollout_steps=10, batch_size=64):
+    """Same 10-step windows as evaluate(); returns one record per rollout with frame tensors."""
+    model.eval()
+    windows = WindowDataset(
+        episodes, context_frames=CONTEXT_FRAMES, rollout_steps=rollout_steps
+    )
+    if len(windows) == 0:
+        raise ValueError(
+            f"No episode has {CONTEXT_FRAMES} frames followed by {rollout_steps} actions."
+        )
+    records = []
+    cursor = 0
+    for context, actions, targets in DataLoader(windows, batch_size=batch_size):
+        prediction = rollout(model, to_float(context.to(device)), actions.to(device))
+        clamped = prediction.clamp(0.0, 1.0)
+        mae, _ = frame_metrics(clamped, to_float(targets.to(device)))
+        mae = mae.cpu()
+        for j in range(context.shape[0]):
+            episode_id, start_index = windows.meta[cursor + j]
+            step_actions = actions[j, CONTEXT_FRAMES - 1 : CONTEXT_FRAMES - 1 + rollout_steps]
+            records.append(
+                {
+                    "episode_id": episode_id,
+                    "start_index": start_index,
+                    "actions": [int(a) for a in step_actions.tolist()],
+                    "per_step_mae": [float(x) for x in mae[j].tolist()],
+                    "targets": targets[j].cpu(),
+                    "predictions": clamped[j].cpu(),
+                }
+            )
+        cursor += context.shape[0]
+    return records
+
+
 def load_model(checkpoint_path, device):
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
     model = build_model(checkpoint["model"]).to(device)
