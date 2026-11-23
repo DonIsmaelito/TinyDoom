@@ -343,6 +343,7 @@
       app.panels[model.name].now.textContent = 'starting from the real frame';
     }
     renderReadout(0, null);
+    drawChart();
   }
 
   function renderStep(result) {
@@ -353,6 +354,140 @@
         `error now ${result.errors[model.name].toFixed(3)}`;
     }
     renderReadout(result.k, result.action);
+    drawChart();
+  }
+
+  // ---- Error chart --------------------------------------------------------------------------
+
+  function chartSeries() {
+    const style = getComputedStyle(document.documentElement);
+    const series = app.models.map((model) => ({
+      name: model.name,
+      label: model.label,
+      color: style.getPropertyValue(`--${model.name}`).trim() || '#ffffff',
+      dashed: false,
+    }));
+    series.push({
+      name: 'repeat_last_frame',
+      label: 'No model: repeat the last real frame',
+      color: style.getPropertyValue('--repeat').trim(),
+      dashed: true,
+    });
+    return series;
+  }
+
+  function buildLegend() {
+    for (const series of chartSeries()) {
+      const item = document.createElement('li');
+      const swatch = document.createElement('span');
+      swatch.className = series.dashed ? 'swatch dashed' : 'swatch';
+      swatch.style.borderTopColor = series.color;
+      item.append(swatch, series.label);
+      $('legend').append(item);
+    }
+  }
+
+  // A round number at or above value, for the top of the error axis.
+  function niceCeiling(value) {
+    const unit = 10 ** Math.floor(Math.log10(value));
+    for (const m of [1, 2, 2.5, 5, 10]) if (m * unit >= value) return m * unit;
+    return 10 * unit;
+  }
+
+  function drawChart() {
+    const canvas = $('chart');
+    const ratio = window.devicePixelRatio || 1;
+    const width = canvas.clientWidth;
+    const height = canvas.clientHeight;
+    if (!width || !height) return;
+    if (canvas.width !== Math.round(width * ratio)) canvas.width = Math.round(width * ratio);
+    if (canvas.height !== Math.round(height * ratio)) canvas.height = Math.round(height * ratio);
+    const g = canvas.getContext('2d');
+    g.setTransform(ratio, 0, 0, ratio, 0, 0);
+    g.clearRect(0, 0, width, height);
+
+    const style = getComputedStyle(document.documentElement);
+    const muted = style.getPropertyValue('--muted').trim();
+    const line = style.getPropertyValue('--line').trim();
+    const fontSize = width < 500 ? 12 : 15;
+    g.font = `${fontSize}px system-ui, sans-serif`;
+
+    const means = app.stats.means();
+    const steps = Math.max(10, app.stats.counts.length - 1);
+    let top = 0.02;
+    for (const values of Object.values(means)) {
+      for (let k = 1; k < values.length; k++) top = Math.max(top, values[k] || 0);
+    }
+    top = niceCeiling(top);
+
+    const box = { left: fontSize * 4, right: width - 12, top: 10, bottom: height - fontSize * 3 };
+    const x = (k) => box.left + ((k - 1) / (steps - 1)) * (box.right - box.left);
+    const y = (value) => box.bottom - (value / top) * (box.bottom - box.top);
+
+    g.lineWidth = 1;
+    g.strokeStyle = line;
+    g.fillStyle = muted;
+    g.textAlign = 'right';
+    g.textBaseline = 'middle';
+    for (let i = 0; i <= 4; i++) {
+      const value = (top * i) / 4;
+      g.beginPath();
+      g.moveTo(box.left, y(value));
+      g.lineTo(box.right, y(value));
+      g.stroke();
+      g.fillText(value.toFixed(3), box.left - 8, y(value));
+    }
+    g.textAlign = 'center';
+    g.textBaseline = 'top';
+    const labels = width < 500 ? 6 : 12;
+    const every = steps <= labels ? 1 : Math.ceil(steps / labels / 5) * 5;
+    for (let k = 1; k <= steps; k++) {
+      if (k === 1 || k % every === 0) g.fillText(k, x(k), box.bottom + 6);
+    }
+    const title = 'steps since the models last saw a real frame';
+    g.fillText(title, (box.left + box.right) / 2, box.bottom + 8 + fontSize);
+
+    // Where playback is now.
+    const k = app.player ? app.player.k : null;
+    if (k) {
+      g.strokeStyle = style.getPropertyValue('--accent').trim();
+      g.globalAlpha = 0.5;
+      g.beginPath();
+      g.moveTo(x(k), box.top);
+      g.lineTo(x(k), box.bottom);
+      g.stroke();
+      g.globalAlpha = 1;
+    }
+
+    for (const series of chartSeries().reverse()) {
+      const values = means[series.name] || [];
+      g.strokeStyle = series.color;
+      g.fillStyle = series.color;
+      g.lineWidth = 3;
+      g.setLineDash(series.dashed ? [8, 6] : []);
+      g.beginPath();
+      let drawing = false;
+      for (let step = 1; step < values.length; step++) {
+        if (values[step] === undefined) {
+          drawing = false;
+        } else if (drawing) {
+          g.lineTo(x(step), y(values[step]));
+        } else {
+          g.moveTo(x(step), y(values[step]));
+          drawing = true;
+        }
+      }
+      g.stroke();
+      g.setLineDash([]);
+      if (steps <= 30) {
+        for (let step = 1; step < values.length; step++) {
+          if (values[step] === undefined) continue;
+          g.beginPath();
+          g.arc(x(step), y(values[step]), 4, 0, 2 * Math.PI);
+          g.fill();
+        }
+      }
+    }
   }
 
   function startScene(index) {
@@ -523,11 +658,13 @@
 
     buildPanels();
     buildControls();
-    startScene(0);
+    buildLegend();
     $('clip').hidden = true;
     $('panels').hidden = false;
     $('compare').hidden = false;
     setStatus('');
+    startScene(0);
+    window.addEventListener('resize', drawChart);
   }
 
   // ---- For the tests in test_demo_page.py --------------------------------------------------

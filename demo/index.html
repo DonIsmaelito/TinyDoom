@@ -56,6 +56,17 @@
           <select id="scene"></select>
         </label>
       </div>
+
+      <div class="chart-box">
+        <h2>How fast do the predictions drift from the real game?</h2>
+        <p class="hint">
+          Error is the average difference between a predicted frame and the real one, per color
+          value: 0 is identical, 1 is black against white. The chart fills in as the page plays.
+        </p>
+        <canvas id="chart" class="chart" aria-label="Error by steps since the last real frame">
+        </canvas>
+        <ul id="legend" class="legend"></ul>
+      </div>
     </section>
   </main>
 
