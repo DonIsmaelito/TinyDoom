@@ -1,0 +1,17 @@
+# Datasets and checkpoints
+data/
+checkpoints/
+*.npz
+*.pt
+*.pth
+metrics*.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# ViZDoom runtime files
+_vizdoom/
+_vizdoom.ini
