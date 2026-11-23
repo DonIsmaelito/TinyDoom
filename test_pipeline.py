@@ -22,7 +22,7 @@ from data import (
     split_counts,
 )
 from evaluate import collect_rollouts, evaluate, frame_metrics
-from gallery import run_gallery
+from gallery import run_gallery, select_rollouts, windows_overlap
 from model import build_model, count_parameters, rollout
 from train import prediction_loss
 
@@ -218,6 +218,53 @@ def test_collect_rollouts_step10_mae_matches_evaluate():
     mean10 = sum(r["per_step_mae"][-1] for r in records) / len(records)
     assert len(records) == agg["rollouts"]
     assert mean10 == pytest.approx(agg["steps"]["10"]["mae"], rel=0, abs=1e-6)
+
+
+def test_select_rollouts_dedupes_overlapping_windows():
+    merged = []
+    for start in range(8, 18):
+        merged.append(
+            {
+                "episode_id": 57,
+                "start_index": start,
+                "rank_mae": 1.0 - start * 0.01,
+                "actions": [0] * 10,
+                "targets": None,
+                "models": {},
+            }
+        )
+    for start in range(30, 40):
+        merged.append(
+            {
+                "episode_id": 53,
+                "start_index": start,
+                "rank_mae": 0.5 - start * 0.001,
+                "actions": [0] * 10,
+                "targets": None,
+                "models": {},
+            }
+        )
+    selected, ranking = select_rollouts(merged, worst_k=8, best_k=2, dedupe_overlap=True)
+    worst = [r for r in selected if r["selection"] == "worst"]
+    assert len(worst) == 2
+    assert worst[0]["episode_id"] == 57 and worst[0]["start_index"] == 8
+    assert worst[1]["episode_id"] == 53 and worst[1]["start_index"] == 30
+    by_ep = {}
+    for item in worst:
+        by_ep.setdefault(item["episode_id"], []).append(item["start_index"])
+    for starts in by_ep.values():
+        for i, s0 in enumerate(starts):
+            for s1 in starts[i + 1 :]:
+                assert not windows_overlap(s0, s1)
+    assert len(ranking) == len(merged)
+    assert ranking[0]["start_index"] == 8
+
+    dense_worst, _ = select_rollouts(
+        merged, worst_k=8, best_k=0, dedupe_overlap=False
+    )
+    assert len(dense_worst) == 8
+    assert dense_worst[0]["start_index"] == 8
+    assert dense_worst[1]["start_index"] == 9
 
 
 def test_gallery_writes_strips_and_json(tmp_path):

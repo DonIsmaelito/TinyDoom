@@ -19,10 +19,34 @@ from train import pick_device
 
 ROLLOUT_STEPS = max(STEPS)
 SCALE = 4
-LABEL_HEIGHT = 36
-ROW_GAP = 2
-STRIP_PAD = 8
+LABEL_HEIGHT = 72
+ROW_LABEL_WIDTH = 112
+ROW_GAP = 4
+STRIP_PAD = 12
 CONTACT_GAP = 12
+DIFF_MAX = 255  # fixed uint8 scale for |real - pred| per RGB channel
+
+
+def load_fonts():
+    """Readable poster labels; falls back to default if DejaVu is missing."""
+    try:
+        title = ImageFont.truetype("DejaVuSans-Bold.ttf", 18)
+        row = ImageFont.truetype("DejaVuSans-Bold.ttf", 16)
+        column = ImageFont.truetype("DejaVuSans.ttf", 15)
+    except OSError:
+        title = row = column = ImageFont.load_default()
+    return title, row, column
+
+
+def rollout_interval(start_index, rollout_steps=ROLLOUT_STEPS):
+    """Inclusive frame indices of the 10 predicted targets (t+1 .. t+rollout_steps)."""
+    return start_index + 1, start_index + rollout_steps
+
+
+def windows_overlap(start_a, start_b, rollout_steps=ROLLOUT_STEPS):
+    a0, a1 = rollout_interval(start_a, rollout_steps)
+    b0, b1 = rollout_interval(start_b, rollout_steps)
+    return not (a1 < b0 or b1 < a0)
 
 
 def chw_to_hwc_uint8(tensor):
@@ -40,11 +64,8 @@ def upscale_nearest(frame_hwc, scale):
 
 
 def abs_diff_row(real_hwc, pred_hwc):
-    diff = np.abs(real_hwc.astype(np.int16) - pred_hwc.astype(np.int16)).astype(np.uint8)
-    scale = diff.max()
-    if scale == 0:
-        return diff
-    return (diff.astype(np.float32) / scale * 255).astype(np.uint8)
+    """Per-channel |real - pred| on uint8 RGB; fixed 0..255 scale (no per-frame normalization)."""
+    return np.abs(real_hwc.astype(np.int16) - pred_hwc.astype(np.int16)).astype(np.uint8)
 
 
 def render_strip(record, model_name, scale=SCALE):
@@ -74,34 +95,46 @@ def render_strip(record, model_name, scale=SCALE):
         diff_tiles.append(upscale_nearest(abs_diff_row(real, pred), scale))
     rows.append(diff_tiles)
 
-    width = steps * up_w + (steps - 1) * ROW_GAP + 2 * STRIP_PAD
-    height = 3 * up_h + 2 * ROW_GAP + LABEL_HEIGHT + 2 * STRIP_PAD
+    grid_x0 = STRIP_PAD + ROW_LABEL_WIDTH
+    width = grid_x0 + steps * up_w + (steps - 1) * ROW_GAP + STRIP_PAD
+    height = 3 * up_h + 2 * ROW_GAP + LABEL_HEIGHT + STRIP_PAD + 28
     canvas = Image.new("RGB", (width, height), (24, 24, 24))
     draw = ImageDraw.Draw(canvas)
-    font = ImageFont.load_default()
+    title_font, row_font, column_font = load_fonts()
 
     title = (
-        f"{model_name}  ep {record['episode_id']}  start {record['start_index']}  "
+        f"{model_name}  episode {record['episode_id']}  start frame {record['start_index']}  "
         f"step-10 MAE {record['per_step_mae'][-1]:.5f}"
     )
-    draw.text((STRIP_PAD, 4), title, fill=(220, 220, 220), font=font)
+    draw.text((STRIP_PAD, 6), title, fill=(235, 235, 235), font=title_font)
 
-    y0 = STRIP_PAD + 16
-    row_labels = ("real", "pred", "diff")
+    y0 = 28
+    row_labels = ("Real", "Predicted", "Difference")
     for row_idx, tiles in enumerate(rows):
         y = y0 + row_idx * (up_h + ROW_GAP)
         for col, tile in enumerate(tiles):
-            x = STRIP_PAD + col * (up_w + ROW_GAP)
+            x = grid_x0 + col * (up_w + ROW_GAP)
             canvas.paste(tile, (x, y))
-        draw.text((2, y + up_h // 2), row_labels[row_idx], fill=(180, 180, 180), font=font)
+        draw.text(
+            (STRIP_PAD, y + up_h // 2 - 10),
+            row_labels[row_idx],
+            fill=(230, 230, 230),
+            font=row_font,
+        )
 
-    label_y = y0 + 3 * up_h + 2 * ROW_GAP
+    label_y = y0 + 3 * up_h + 2 * ROW_GAP + 4
     for col in range(steps):
-        x = STRIP_PAD + col * (up_w + ROW_GAP)
+        x = grid_x0 + col * (up_w + ROW_GAP)
         action = ACTION_NAMES[record["actions"][col]]
         mae = record["per_step_mae"][col]
-        text = f"{action}\n{mae:.4f}"
-        draw.multiline_text((x, label_y), text, fill=(200, 200, 200), font=font, spacing=2)
+        text = f"{action}\nMAE {mae:.4f}"
+        draw.multiline_text(
+            (x, label_y),
+            text,
+            fill=(235, 235, 235),
+            font=column_font,
+            spacing=4,
+        )
 
     return canvas
 
@@ -131,19 +164,53 @@ def build_contact_sheet(images, columns=2):
     return sheet
 
 
-def select_rollouts(merged, worst_k=8, best_k=2):
+def raw_ranking(merged):
     ranked = sorted(merged, key=lambda r: r["rank_mae"], reverse=True)
-    worst = ranked[:worst_k]
-    best = ranked[-best_k:] if best_k else []
-    chosen, seen = [], set()
-    for label, group in (("worst", worst), ("best", best)):
-        for item in group:
-            key = (item["episode_id"], item["start_index"])
-            if key in seen:
-                continue
-            seen.add(key)
-            chosen.append({**item, "selection": label})
+    return [
+        {
+            "rank": index + 1,
+            "episode_id": item["episode_id"],
+            "start_index": item["start_index"],
+            "step10_mae": float(item["rank_mae"]),
+        }
+        for index, item in enumerate(ranked)
+    ]
+
+
+def pick_non_overlapping(candidates, k, picked_by_episode, rollout_steps, label):
+    chosen = []
+    for item in candidates:
+        if len(chosen) >= k:
+            break
+        episode_id = item["episode_id"]
+        start_index = item["start_index"]
+        starts = picked_by_episode.get(episode_id, [])
+        if any(windows_overlap(start_index, other, rollout_steps) for other in starts):
+            continue
+        chosen.append({**item, "selection": label})
+        picked_by_episode.setdefault(episode_id, []).append(start_index)
     return chosen
+
+
+def select_rollouts(
+    merged, worst_k=8, best_k=2, dedupe_overlap=True, rollout_steps=ROLLOUT_STEPS
+):
+    ranked_desc = sorted(merged, key=lambda r: r["rank_mae"], reverse=True)
+    ranked_asc = list(reversed(ranked_desc))
+    ranking = raw_ranking(merged)
+
+    if not dedupe_overlap:
+        worst = [{**item, "selection": "worst"} for item in ranked_desc[:worst_k]]
+        best = [{**item, "selection": "best"} for item in ranked_asc[:best_k]]
+        return worst + best, ranking
+
+    worst = pick_non_overlapping(
+        ranked_desc, worst_k, {}, rollout_steps, "worst"
+    )
+    best = pick_non_overlapping(
+        ranked_asc, best_k, {}, rollout_steps, "best"
+    )
+    return worst + best, ranking
 
 
 def run_gallery(
@@ -155,9 +222,15 @@ def run_gallery(
     best_k=2,
     batch_size=64,
     rank_checkpoint_index=0,
+    dedupe_overlap=True,
 ):
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    for old in out_dir.glob("*.png"):
+        old.unlink()
+    json_old = out_dir / "gallery.json"
+    if json_old.exists():
+        json_old.unlink()
 
     loaded = []
     for path in checkpoint_paths:
@@ -190,10 +263,14 @@ def run_gallery(
         entry["rank_mae"] = entry["models"][rank_model]["per_step_mae"][-1]
         merged.append(entry)
 
-    selected = select_rollouts(merged, worst_k=worst_k, best_k=best_k)
+    selected, ranking = select_rollouts(
+        merged, worst_k=worst_k, best_k=best_k, dedupe_overlap=dedupe_overlap
+    )
     summary = {
         "rollout_steps": ROLLOUT_STEPS,
+        "dedupe_overlap": dedupe_overlap,
         "rank_model": rank_model,
+        "raw_ranking": ranking,
         "mean_step10_mae_by_model": {
             name: float(np.mean([r["per_step_mae"][-1] for r in records]))
             for _, name, records in loaded
@@ -256,6 +333,13 @@ def main():
     parser.add_argument("--worst-k", type=int, default=8)
     parser.add_argument("--best-k", type=int, default=2)
     parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument(
+        "--no-dedupe-overlap",
+        action="store_false",
+        dest="dedupe_overlap",
+        help="allow overlapping windows from the same episode in the gallery",
+    )
+    parser.set_defaults(dedupe_overlap=True)
     args = parser.parse_args()
 
     device = pick_device(args.device)
@@ -278,6 +362,7 @@ def main():
         worst_k=args.worst_k,
         best_k=args.best_k,
         batch_size=args.batch_size,
+        dedupe_overlap=args.dedupe_overlap,
     )
     print(f"\nWrote {len(strips)} strips, {len(contacts)} contact sheet(s), {json_path}")
     for name, mae in summary["mean_step10_mae_by_model"].items():

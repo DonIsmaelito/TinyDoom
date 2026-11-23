@@ -143,10 +143,16 @@ python gallery.py --checkpoint checkpoints/cnn_best.pt --out-dir gallery/
 python gallery.py --checkpoint checkpoints/cnn_best.pt checkpoints/convgru_best.pt
 ```
 
-Rollouts are ranked by step-10 MAE (first checkpoint when several are passed). Each strip has
-real frames on top, predictions below, and an absolute-difference row. Frames are upscaled
-with nearest-neighbor for legibility. The script also writes a contact sheet per checkpoint
-and `gallery.json` with episode id, start index, actions, and per-step MAE.
+Rollouts are ranked by step-10 MAE (first checkpoint when several are passed). By default the
+gallery skips a rollout when its 10 predicted frames overlap a window already chosen from the
+same episode (`--no-dedupe-overlap` turns that off). The full ordering is kept in
+`gallery.json` as `raw_ranking`.
+
+Each strip has real frames on top, model predictions below, and a difference row. The
+difference row is the per-channel absolute value `|real − pred|` on uint8 RGB pixels, on a
+fixed 0–255 scale (no per-frame or per-strip normalization). Frames are upscaled with
+nearest-neighbor for legibility. The script also writes a contact sheet per checkpoint and
+`gallery.json` with episode id, start index, actions, and per-step MAE.
 
 ## Files
 
