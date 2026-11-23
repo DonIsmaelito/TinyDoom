@@ -50,8 +50,9 @@ python evaluate.py --checkpoint checkpoints/cnn_best.pt checkpoints/convgru_best
 Every script has `--help`. Training and evaluation use a GPU when PyTorch finds one and the
 CPU otherwise. Pass `--device cpu`, `--device cuda`, or `--device mps` to choose.
 
-Run the tests with `pytest`. They use small synthetic episodes and take a few seconds. One
-test collects real episodes and is skipped if ViZDoom is not installed.
+Run the tests with `pytest`. They use small synthetic episodes. The pipeline tests take a few
+seconds and the demo tests about a minute. One test collects real episodes and is skipped if
+ViZDoom is not installed. The demo page tests are skipped if Playwright is not installed.
 
 ## Data collection (`collect.py`)
 
@@ -138,6 +139,76 @@ After the models, the script prints the same metrics for a reference that needs 
 repeats the last real frame for all 10 steps. A model is only useful where it beats this. With
 `--out`, each model's entry also carries these numbers under `repeat_last_frame`.
 
+## Demo page (`export_demo.py`, `demo/`)
+
+The demo is a web page that plays test episodes and shows three pictures side by side: the
+real game, the CNN's prediction, and the ConvGRU's prediction. Both models run in the browser.
+Nothing is sent to a server.
+
+```bash
+# 1. Export both trained models and a few test episodes into demo/
+python export_demo.py
+
+# 2. Serve the page on this computer and open http://localhost:8000
+python -m http.server --directory demo 8000
+```
+
+The page has to be served: opening `demo/index.html` as a file does not work, because the
+browser will not let a page loaded from a file read the models. Once the page is loaded it
+needs no network at all.
+
+`export_demo.py` writes these into `demo/`:
+
+| File | Contents |
+| --- | --- |
+| `models/cnn.onnx`, `models/convgru.onnx` | one prediction step of each model, output clamped to 0 to 1 |
+| `episodes/episode_<id>.png` | all frames of a test episode in one lossless image |
+| `manifest.json` | the list of models and episodes, the recorded actions, good start frames, and the `evaluate.py` numbers the page is checked against |
+| `clip.webp` | a recording of the same comparison, shown while the models load and if they cannot run |
+
+The export stops with an error if a 10-step rollout through an ONNX file differs from
+`model.rollout()` by more than 0.00001 on any pixel value. By default it picks the 4 test
+episodes with the most to look at (`--episodes`, or name them with `--episode-ids`). Many
+frames in this map are one flat wall, so the export also picks start frames where the view has
+large areas of different color and keeps changing.
+
+On the page:
+
+- **Play, Pause, Step, Reset.** Space, S, and R do the same. Reset goes back to the start
+  frame of the chosen episode and clears the chart.
+- **Speed**: 1, 2, 4, or 8.75 steps a second. 8.75 is the speed of the game.
+- **Show the models a real frame**: every 1, 5, 10, or 30 steps, or never again. Between real
+  frames each model predicts from its own last prediction. When the ConvGRU is shown a real
+  frame, its memory is emptied and it observes that frame and the three before it.
+- **Episode**: the exported episodes and their start frames.
+- **The chart** plots each model's mean absolute error against the number of steps since the
+  models last saw a real frame, measured as the page plays. The dashed line is the reference
+  that repeats the last real frame.
+- A paused page plays again by itself after 20 seconds without input. After two minutes it
+  also returns to the default speed and real-frame setting.
+
+The address can change the defaults, for example
+`http://localhost:8000/?interval=5&speed=8.75&idle=60`. `idle=0` turns off playing by itself,
+and `autoplay=0` starts the page paused.
+
+The page runs the models with ONNX Runtime Web on one WebAssembly thread. Its files are stored
+in `demo/vendor/` (about 15 MB), so the page loads nothing from other sites.
+
+### Demo tests
+
+`pytest` also runs `test_demo.py` and `test_demo_page.py`. Both use untrained models of the
+real size and synthetic episodes.
+
+- `test_demo.py` checks the export: the ONNX files against `model.rollout()`, the input and
+  output names, shapes, and types, that the episode images decode to the stored frames, and
+  that the numbers in `manifest.json` are what `evaluate.py` computes.
+- `test_demo_page.py` opens the page in headless Chrome. It needs `pip install playwright`
+  and Chrome (or `playwright install chromium`), and is skipped without them. It checks that
+  the page's error at 1, 5, and 10 steps equals the exported `evaluate.py` numbers, that
+  Reset gives the same pictures again, that no request leaves `localhost`, that both models
+  plus drawing take less than the 114 ms the game takes per step, and that the clip appears
+  when the models cannot load.
+
 ## Files
 
 | File | Purpose |
@@ -147,4 +218,8 @@ repeats the last real frame for all 10 steps. A model is only useful where it be
 | `model.py` | both models and the shared rollout function |
 | `train.py` | training loop, saves the best checkpoint by validation loss |
 | `evaluate.py` | rollout evaluation, MAE and PSNR at 1, 5, and 10 steps |
-| `test_pipeline.py` | pytest checks |
+| `test_pipeline.py` | pytest checks of the pipeline |
+| `export_demo.py` | exports the trained models, test episodes, and check numbers for the demo page |
+| `demo/` | the demo page: `index.html`, `app.js`, `style.css`, and ONNX Runtime Web in `vendor/` |
+| `test_demo.py` | pytest checks of the export |
+| `test_demo_page.py` | pytest checks of the page in headless Chrome |
