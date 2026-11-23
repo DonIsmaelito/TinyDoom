@@ -4,7 +4,16 @@
 // ONNX Runtime Web, and the real frames come from test episodes exported by export_demo.py.
 
 (() => {
-  const DEFAULTS = { interval: 10, speed: 4 };
+  // The page address can change these: ?interval=5&speed=8.75&idle=30&autoplay=0
+  const params = new URLSearchParams(location.search);
+  const number = (name, fallback) =>
+    params.has(name) && Number.isFinite(Number(params.get(name)))
+      ? Number(params.get(name))
+      : fallback;
+  const DEFAULTS = { interval: number('interval', 10), speed: number('speed', 4) };
+  // A paused page plays again by itself after this long without input (0 turns this off),
+  // and after six times as long it also goes back to the default settings.
+  const IDLE_SECONDS = number('idle', 20);
 
   const $ = (id) => document.getElementById(id);
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -250,6 +259,7 @@
     player: null,
     stats: new ErrorStats(),
     playing: false,
+    failed: false,
     interval: DEFAULTS.interval,
     speed: DEFAULTS.speed,
     loop: 0,
@@ -529,6 +539,7 @@
     app.playing = playing;
     app.loop += 1;
     $('play').textContent = playing ? 'Pause' : 'Play';
+    $('idle-note').hidden = playing || IDLE_SECONDS <= 0;
     if (playing) playLoop(app.loop).catch(fail);
   }
 
@@ -599,6 +610,88 @@
     });
   }
 
+  // ---- Poster mode: play by itself when nobody is using the page ----------------------------
+
+  function watchForIdle() {
+    if (IDLE_SECONDS <= 0) return;
+    $('idle-note').textContent =
+      `Paused. It plays again by itself after ${IDLE_SECONDS} seconds without input.`;
+    let lastInput = performance.now();
+    for (const type of ['pointerdown', 'keydown', 'input', 'change', 'wheel']) {
+      document.addEventListener(
+        type,
+        () => {
+          lastInput = performance.now();
+        },
+        { capture: true, passive: true }
+      );
+    }
+    setInterval(() => {
+      const idle = (performance.now() - lastInput) / 1000;
+      if (app.failed) return;
+      if (idle >= IDLE_SECONDS && !app.playing) setPlaying(true);
+      if (idle >= 6 * IDLE_SECONDS) {
+        if (app.interval !== DEFAULTS.interval) setRealFrameInterval(DEFAULTS.interval);
+        if (app.speed !== DEFAULTS.speed) setSpeed(DEFAULTS.speed);
+      }
+    }, 1000);
+  }
+
+  // ---- The text under the chart --------------------------------------------------------------
+
+  function buildAbout() {
+    for (const model of app.models) {
+      const item = document.createElement('li');
+      const memory = model.hiddenShape
+        ? 'It has a memory, so it can use what it saw in earlier frames.'
+        : 'It sees only its current frame.';
+      item.textContent =
+        `${model.label}: ${model.parameters.toLocaleString('en-US')} parameters. ${memory}`;
+      $('model-notes').append(item);
+    }
+    const sizes = app.models.map((model) => model.parameters);
+    const ratio = Math.max(...sizes) / Math.min(...sizes);
+    if (app.models.length === 2 && ratio >= 1.25) {
+      const [small, large] = [...app.models].sort((a, b) => a.parameters - b.parameters);
+      const times = Math.abs(ratio - 2) < 0.25 ? 'about twice' : `${ratio.toFixed(1)} times`;
+      const item = document.createElement('li');
+      const also = large.hiddenShape && !small.hiddenShape ? 'its memory' : 'its design';
+      item.textContent =
+        `The ${large.label} has ${times} the parameters of the ${small.label}, so a better ` +
+        `score may come from its size as well as from ${also}.`;
+      $('model-notes').append(item);
+    }
+
+    const metrics = app.manifest.metrics;
+    if (!metrics) {
+      $('scores-title').hidden = true;
+      return;
+    }
+    $('scores-title').textContent =
+      `Scores on all ${metrics.episodes} ${metrics.split} episodes (${metrics.rollouts} rollouts)`;
+    const rows = app.models.map((model) => ({ label: model.label, steps: metrics[model.name] }));
+    rows.push({ label: 'No model: repeat the last frame', steps: metrics.repeat_last_frame });
+    const columns = Object.keys(metrics.repeat_last_frame);
+    const head = $('scores').createTHead().insertRow();
+    head.append(document.createElement('th'));
+    for (const step of columns) {
+      const cell = document.createElement('th');
+      cell.textContent = `${step} step${step === '1' ? '' : 's'}`;
+      head.append(cell);
+    }
+    const body = $('scores').createTBody();
+    for (const row of rows) {
+      const line = body.insertRow();
+      line.insertCell().textContent = row.label;
+      for (const step of columns) {
+        const cell = line.insertCell();
+        cell.textContent = row.steps[step].mae.toFixed(4);
+        const best = Math.min(...rows.map((other) => other.steps[step].mae));
+        if (row.steps[step].mae === best) cell.className = 'best';
+      }
+    }
+  }
+
   // ---- Loading -----------------------------------------------------------------------------
 
   function setStatus(text, isError) {
@@ -608,9 +701,13 @@
 
   function fail(error) {
     console.error(error);
+    app.failed = true;
     setPlaying(false);
+    $('idle-note').hidden = true;
     $('panels').hidden = true;
     $('compare').hidden = true;
+    $('chart-section').hidden = true;
+    $('layout').classList.remove('ready');
     if (app.manifest && app.manifest.clip) {
       showClip();
       setStatus(
@@ -659,9 +756,15 @@
     buildPanels();
     buildControls();
     buildLegend();
+    buildAbout();
+    setRealFrameInterval(DEFAULTS.interval);
+    setSpeed(DEFAULTS.speed);
+    $('about').hidden = false;
     $('clip').hidden = true;
     $('panels').hidden = false;
     $('compare').hidden = false;
+    $('chart-section').hidden = false;
+    $('layout').classList.add('ready');
     setStatus('');
     startScene(0);
     window.addEventListener('resize', drawChart);
@@ -687,9 +790,9 @@
     });
   }
 
-  const params = new URLSearchParams(location.search);
   const ready = load().then(() => {
-    if (params.get('autoplay') !== '0') setPlaying(true);
+    setPlaying(params.get('autoplay') !== '0');
+    watchForIdle();
     return true;
   });
   ready.catch(fail);

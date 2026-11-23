@@ -11,53 +11,63 @@
   <main>
     <header>
       <h1>TinyDoom</h1>
+      <p class="lead">
+        Two small neural networks predict what Doom will show next from the current frame and
+        the player's action, and each has to build on its own predictions until it is shown a
+        real frame again.
+      </p>
     </header>
 
-    <section id="stage" aria-live="polite">
-      <div id="panels" class="panels" hidden></div>
-      <img id="clip" class="clip" alt="Recording of the real game next to both models' predictions" hidden>
-      <p id="status" class="status">Loading the models…</p>
-    </section>
+    <div id="layout" class="layout">
+      <div class="main-column">
+        <section id="stage" aria-live="polite">
+          <div id="panels" class="panels" hidden></div>
+          <img id="clip" class="clip" alt="Recording of the real game next to both models' predictions" hidden>
+          <p id="status" class="status">Loading the models…</p>
+        </section>
 
-    <section id="compare" hidden>
-      <div class="readout">
-        <p id="counter" class="counter">
-          <span id="steps" class="steps">0</span>
-          <span id="steps-label">steps since the models last saw a real frame</span>
-        </p>
-        <div class="action">
-          <span class="action-label">The player's recorded action</span>
-          <span id="keys" class="keys"></span>
-        </div>
+        <section id="compare" hidden>
+          <div class="readout">
+            <p id="counter" class="counter">
+              <span id="steps" class="steps">0</span>
+              <span id="steps-label">steps since the models last saw a real frame</span>
+            </p>
+            <div class="action">
+              <span class="action-label">The player's recorded action</span>
+              <span id="keys" class="keys"></span>
+            </div>
+          </div>
+
+          <div class="controls">
+            <button id="play" type="button">Pause</button>
+            <button id="step" type="button">Step</button>
+            <button id="reset" type="button">Reset</button>
+            <label>Speed
+              <select id="speed">
+                <option value="1">1 step a second</option>
+                <option value="2">2 steps a second</option>
+                <option value="4" selected>4 steps a second</option>
+                <option value="8.75">Game speed (8.75 steps a second)</option>
+              </select>
+            </label>
+            <label>Show the models a real frame
+              <select id="interval">
+                <option value="1">every step</option>
+                <option value="5">every 5 steps</option>
+                <option value="10" selected>every 10 steps</option>
+                <option value="30">every 30 steps</option>
+                <option value="0">never again</option>
+              </select>
+            </label>
+            <label>Episode
+              <select id="scene"></select>
+            </label>
+            <span id="idle-note" class="idle-note" hidden></span>
+          </div>
+        </section>
       </div>
 
-      <div class="controls">
-        <button id="play" type="button">Pause</button>
-        <button id="step" type="button">Step</button>
-        <button id="reset" type="button">Reset</button>
-        <label>Speed
-          <select id="speed">
-            <option value="1">1 step a second</option>
-            <option value="2">2 steps a second</option>
-            <option value="4" selected>4 steps a second</option>
-            <option value="8.75">Game speed (8.75 steps a second)</option>
-          </select>
-        </label>
-        <label>Show the models a real frame
-          <select id="interval">
-            <option value="1">every step</option>
-            <option value="5">every 5 steps</option>
-            <option value="10" selected>every 10 steps</option>
-            <option value="30">every 30 steps</option>
-            <option value="0">never again</option>
-          </select>
-        </label>
-        <label>Episode
-          <select id="scene"></select>
-        </label>
-      </div>
-
-      <div class="chart-box">
+      <section id="chart-section" class="chart-box" hidden>
         <h2>How fast do the predictions drift from the real game?</h2>
         <p class="hint">
           Error is the average difference between a predicted frame and the real one, per color
@@ -66,9 +76,42 @@
         <canvas id="chart" class="chart" aria-label="Error by steps since the last real frame">
         </canvas>
         <ul id="legend" class="legend"></ul>
+      </section>
+    </div>
+
+    <section id="about" class="about-grid" hidden>
+      <div class="box">
+        <h2>The two models</h2>
+        <ul id="model-notes" class="notes"></ul>
+        <h2 id="scores-title" class="second">Scores on the test episodes</h2>
+        <table id="scores" class="scores"></table>
+        <p class="hint small">
+          Error after 1, 5, and 10 steps from the model's own predictions, from
+          <code>evaluate.py</code>. Lower is better.
+        </p>
+      </div>
+      <div class="box">
+        <h2>What this demo does not show</h2>
+        <ul class="notes">
+          <li>The frames are 64 by 64 pixels, from one map (ViZDoom "My Way Home"), with three
+            actions: forward, turn left, and turn right.</li>
+          <li>The episodes here are test episodes that the models were not trained on, but they
+            come from the same map.</li>
+          <li>The actions are recorded. You cannot steer the models on this page.</li>
+          <li>A blurry picture can still have a low error, so judge the pictures as well as the
+            chart.</li>
+          <li>The chart covers only the few episodes played on this page. The table gives the
+            scores on the whole test split.</li>
+        </ul>
       </div>
     </section>
+
+    <footer>
+      <a href="https://github.com/DonIsmaelito/TinyDoom">Code and models: TinyDoom on GitHub</a>
+    </footer>
   </main>
+
+  <noscript><p class="status error">This page needs JavaScript to run the models.</p></noscript>
 
   <script src="vendor/ort.wasm.min.js"></script>
   <script src="app.js"></script>

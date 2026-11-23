@@ -115,8 +115,27 @@ h1 {
   display: none;
 }
 
-#compare[hidden] {
+#compare[hidden],
+#chart-section[hidden] {
   display: none;
+}
+
+/* On a wide screen the chart sits beside the pictures, so both are in view together. */
+@media (min-width: 1100px) {
+  main {
+    max-width: 1800px;
+  }
+
+  .layout.ready {
+    display: grid;
+    grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
+    gap: 16px;
+    align-items: start;
+  }
+
+  .layout.ready .chart {
+    height: 380px;
+  }
 }
 
 .panel .now {
@@ -248,6 +267,99 @@ h2 {
   font-size: 1.5rem;
 }
 
+h2.second {
+  margin-top: 22px;
+}
+
+.lead {
+  max-width: 62ch;
+  margin: 6px 0 0;
+  font-size: 1.35rem;
+  line-height: 1.35;
+}
+
+.idle-note {
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+
+.idle-note[hidden],
+.about-grid[hidden] {
+  display: none;
+}
+
+.about-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 16px;
+  margin-top: 18px;
+}
+
+.box {
+  padding: 16px;
+  background: var(--panel);
+  border: 2px solid var(--line);
+  border-radius: 10px;
+}
+
+.notes {
+  margin: 0;
+  padding-left: 1.2em;
+}
+
+.notes li {
+  margin: 6px 0;
+}
+
+.scores {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+
+.scores th,
+.scores td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.scores th:first-child,
+.scores td:first-child {
+  text-align: left;
+  white-space: normal;
+}
+
+.scores thead th {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.scores td.best {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.hint.small {
+  margin: 8px 0 0;
+  font-size: 0.95rem;
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.95em;
+}
+
+footer {
+  margin-top: 24px;
+  color: var(--muted);
+}
+
+a {
+  color: var(--convgru);
+}
+
 .hint {
   margin: 0 0 12px;
   color: var(--muted);
@@ -323,10 +435,18 @@ h2 {
   }
 
   .panel .about {
-    font-size: 0.8rem;
+    display: none;
+  }
+
+  .panel .now {
+    font-size: 0.75rem;
   }
 
   .counter {
+    font-size: 1.1rem;
+  }
+
+  .lead {
     font-size: 1.1rem;
   }
 
