@@ -303,14 +303,10 @@ def render_clip(models, episodes, starts, path, steps_per_episode=40, scale=3, f
             window = actions[first : t + FIXTURE_INTERVAL][None]
             with torch.no_grad():
                 predicted = [to_uint8(rollout(m, context, window)[0]) for m in models.values()]
-            real = episode.frames[t]
-            pictures.append(
-                picture([real] * len(labels), "The models get a real frame", True)
-            )
             for k in range(1, FIXTURE_INTERVAL + 1):
-                caption = f"The models are {k} step{'s' if k > 1 else ''} past a real frame"
+                caption = f"{k} step{'s' if k > 1 else ''} since the models last saw a real frame"
                 panels = [episode.frames[t + k]] + [p[k - 1] for p in predicted]
-                pictures.append(picture(panels, caption, False))
+                pictures.append(picture(panels, caption, k == 1))
             t += FIXTURE_INTERVAL
     if not pictures:
         raise ValueError("No episode is long enough for the clip.")
