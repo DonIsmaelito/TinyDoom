@@ -130,6 +130,61 @@ def collect_episode(game, policy, episode_id, max_actions, frame_skip):
     )
 
 
+def episode_fingerprint(episode):
+    """Hash actions and frames so two episodes can be compared for duplicates."""
+    import hashlib
+
+    h = hashlib.sha256()
+    h.update(episode.actions.tobytes())
+    h.update(episode.frames.tobytes())
+    return h.hexdigest()
+
+
+def load_fingerprints(data_dir):
+    from data import load_episodes
+
+    fingerprints = {}
+    for split in SPLITS:
+        if not (Path(data_dir) / split).exists():
+            continue
+        for episode in load_episodes(data_dir, split):
+            fingerprints[episode_fingerprint(episode)] = (split, episode.episode_id)
+    return fingerprints
+
+
+def write_metadata(data_dir, seed, frame_skip, max_actions, episode_counts, transitions):
+    data_dir = Path(data_dir)
+    metadata = {
+        "scenario": "my_way_home",
+        "actions": list(ACTION_NAMES),
+        "frame_skip": frame_skip,
+        "frame_size": FRAME_SIZE,
+        "max_actions": max_actions,
+        "seed": seed,
+        "vizdoom_version": vzd.__version__,
+        "episodes": episode_counts,
+        "transitions": transitions,
+    }
+    (data_dir / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
+    return metadata
+
+
+def count_on_disk(data_dir):
+    """Episode and transition counts from saved files."""
+    from data import load_episodes
+
+    episodes = {split: 0 for split in SPLITS}
+    transitions = {split: 0 for split in SPLITS}
+    for split in SPLITS:
+        split_dir = Path(data_dir) / split
+        if not split_dir.exists():
+            continue
+        for episode in load_episodes(data_dir, split):
+            episodes[split] += 1
+            transitions[split] += len(episode)
+    return episodes, transitions
+
+
 def collect(data_dir, num_episodes=60, max_actions=100, frame_skip=4, seed=0):
     """Collect num_episodes episodes into data_dir/{train,val,test} and write metadata.json."""
     data_dir = Path(data_dir)
@@ -149,19 +204,59 @@ def collect(data_dir, num_episodes=60, max_actions=100, frame_skip=4, seed=0):
     finally:
         game.close()
 
-    metadata = {
-        "scenario": "my_way_home",
-        "actions": list(ACTION_NAMES),
-        "frame_skip": frame_skip,
-        "frame_size": FRAME_SIZE,
-        "max_actions": max_actions,
-        "seed": seed,
-        "vizdoom_version": vzd.__version__,
-        "episodes": {split: split_of.count(split) for split in SPLITS},
-        "transitions": transitions,
-    }
-    (data_dir / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
-    return metadata
+    return write_metadata(
+        data_dir,
+        seed,
+        frame_skip,
+        max_actions,
+        {split: split_of.count(split) for split in SPLITS},
+        transitions,
+    )
+
+
+def collect_train_append(
+    data_dir,
+    num_train,
+    start_episode_id=60,
+    max_actions=100,
+    frame_skip=4,
+    seed=0,
+):
+    """Append num_train episodes to train/, continuing the policy from start_episode_id.
+
+    Replays episodes 0 .. start_episode_id - 1 without saving so the RNG matches a full run,
+    then saves new training episodes with ids start_episode_id .. start_episode_id + num_train - 1.
+    Val and test on disk are left unchanged.
+    """
+    data_dir = Path(data_dir)
+    known = load_fingerprints(data_dir)
+    rng = np.random.default_rng(seed)
+    policy = MixedPolicy(rng)
+    game = make_game(seed)
+    try:
+        for episode_id in range(start_episode_id):
+            episode = collect_episode(game, policy, episode_id, max_actions, frame_skip)
+            while len(episode) == 0:
+                episode = collect_episode(game, policy, episode_id, max_actions, frame_skip)
+
+        for episode_id in range(start_episode_id, start_episode_id + num_train):
+            episode = collect_episode(game, policy, episode_id, max_actions, frame_skip)
+            while len(episode) == 0:
+                episode = collect_episode(game, policy, episode_id, max_actions, frame_skip)
+            fp = episode_fingerprint(episode)
+            if fp in known:
+                other = known[fp]
+                raise RuntimeError(
+                    f"episode {episode_id} duplicates existing episode {other[1]} in {other[0]}"
+                )
+            known[fp] = ("train", episode_id)
+            save_episode(data_dir, "train", episode)
+            print(f"episode {episode_id:4d}  train  {len(episode):3d} actions")
+    finally:
+        game.close()
+
+    episode_counts, transitions = count_on_disk(data_dir)
+    return write_metadata(data_dir, seed, frame_skip, max_actions, episode_counts, transitions)
 
 
 def main():
@@ -172,16 +267,40 @@ def main():
     parser.add_argument("--data-dir", default="data")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--overwrite", action="store_true", help="replace existing episodes")
+    parser.add_argument(
+        "--train-only",
+        type=int,
+        metavar="N",
+        help="append N training episodes to an existing dataset (val and test are untouched)",
+    )
+    parser.add_argument(
+        "--start-episode-id",
+        type=int,
+        default=60,
+        help="first episode id when appending train-only data (default 60)",
+    )
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir)
-    existing = [s for s in SPLITS if any((data_dir / s).glob("episode_*.npz"))]
-    if existing and not args.overwrite:
-        raise SystemExit(f"{data_dir} already contains episodes. Pass --overwrite to replace them.")
-    for split in existing:
-        shutil.rmtree(data_dir / split)
+    if args.train_only is not None:
+        if not (data_dir / "train").exists():
+            raise SystemExit(f"{data_dir}/train does not exist. Collect or copy a base dataset first.")
+        metadata = collect_train_append(
+            data_dir,
+            args.train_only,
+            start_episode_id=args.start_episode_id,
+            max_actions=args.max_actions,
+            frame_skip=args.frame_skip,
+            seed=args.seed,
+        )
+    else:
+        existing = [s for s in SPLITS if any((data_dir / s).glob("episode_*.npz"))]
+        if existing and not args.overwrite:
+            raise SystemExit(f"{data_dir} already contains episodes. Pass --overwrite to replace them.")
+        for split in existing:
+            shutil.rmtree(data_dir / split)
 
-    metadata = collect(data_dir, args.episodes, args.max_actions, args.frame_skip, args.seed)
+        metadata = collect(data_dir, args.episodes, args.max_actions, args.frame_skip, args.seed)
     for split in SPLITS:
         print(
             f"{split:5s}  {metadata['episodes'][split]:3d} episodes  "
